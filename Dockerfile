@@ -1,18 +1,15 @@
 # zimage-auto-light — Z-Image-Turbo 자동 이미지 생성 REST API (gcube 워크로드용)
-# 베이스: CUDA 12.8 + cuDNN runtime (Ubuntu 22.04)
-#   - 지시받은 CUDA 12.8 기준
-#   - RTX 5060(Blackwell)은 CUDA 12.8+ 필요 → 충족
-#   - runtime 선택: 모든 의존성이 prebuilt 휠, 빌드/런타임 컴파일 경로 안 탐 → 경량
-FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04
+# 베이스: CUDA 12.8 + cudnn runtime → runtime 으로 변경
+#   - torch cu128 휠이 cuDNN을 자체 번들하므로 시스템 cudnn(약 1.1GB) 불필요
+#   - 지시받은 CUDA 12.8 기준 / RTX 5060·5090(Blackwell) 충족
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
 
-# ── 빌드 인자: 구울 모델(dtype). build.yml에서 uint4 / int8 로 교체 ──
 ARG MODEL_REPO=Disty0/Z-Image-Turbo-SDNQ-uint4-svd-r32
 
 LABEL maintainer="data-alliance" \
       purpose="z-image-turbo auto image generation REST API for gcube" \
       model="${MODEL_REPO}"
 
-# ── 환경 변수 (이미지 내부 고정) ──
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -25,32 +22,34 @@ ENV DEBIAN_FRONTEND=noninteractive \
     ZIMG_STEPS=8 \
     ZIMG_GUIDANCE=0.0
 
-# ── 시스템 패키지 ──
+# ── 시스템 패키지 (설치 + 정리 한 레이어) ──
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip git wget curl ca-certificates \
+    python3 python3-pip git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# ── pip 업그레이드 ──
-RUN python3 -m pip install --upgrade pip setuptools wheel
+# ── ① torch(cu128)를 '먼저' 설치 ──
+#   이렇게 해야 이후 requirements의 accelerate 등이 CPU torch를 추가로 끌어오지 않음
+#   (기존엔 CPU torch 설치 후 재설치 → 두 벌이 이미지에 박혀 6.5GB 낭비)
+#   torchaudio는 이미지 생성에 불필요 → 제외 (torch + torchvision 만)
+RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    python3 -m pip install --no-cache-dir torch torchvision \
+      --index-url https://download.pytorch.org/whl/cu128
 
-# ── 의존성 설치 + diffusers 소스 설치 ──
+# ── ② 앱 의존성 + diffusers(소스) 설치, 캐시·pycache 정리(같은 레이어) ──
 COPY requirements.txt /app/requirements.txt
-RUN python3 -m pip install -r /app/requirements.txt
-RUN python3 -m pip install --no-deps git+https://github.com/huggingface/diffusers
+RUN python3 -m pip install --no-cache-dir -r /app/requirements.txt && \
+    python3 -m pip install --no-cache-dir --no-deps git+https://github.com/huggingface/diffusers && \
+    find / -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true && \
+    rm -rf /root/.cache /tmp/*
 
-# ── PyTorch를 cu128(CUDA 12.8) 빌드로 교체 (Blackwell 지원) ──
-RUN python3 -m pip uninstall -y torch torchvision torchaudio && \
-    python3 -m pip install torch torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/cu128
-
-# ── 모델을 빌드 단계에서 이미지에 굽기 ──
-#   Tier3는 배포 후 런타임 다운로드 불가 → 빌드 때 HF 캐시에 미리 받아둠
+# ── ③ 모델을 빌드 단계에서 굽기 (Tier3 런타임 다운로드 불가 대응) ──
 RUN mkdir -p ${HF_HUB_CACHE} ${OUTPUT_DIR} && \
-    hf download ${MODEL_REPO}
+    hf download ${MODEL_REPO} && \
+    rm -rf /root/.cache /tmp/*
 
-# ── 런타임은 네트워크 없이 캐시에서 로드 (모델 다운로드 발생 X) ──
+# ── 런타임은 캐시에서 오프라인 로드 ──
 ENV HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1
 
