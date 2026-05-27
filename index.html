@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>zimage-auto-light</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg-deepest:#0A0A14; --bg-deep:#1A1230;
+    --purple:#B47AFF; --purple-deep:#9D4EFF; --purple-label:#7F4FD9;
+    --text:#FFFFFF; --text-2:#E0D8F0; --text-muted:#A0A0B0; --text-dim:#8A8A98;
+    --line:rgba(180,122,255,0.22); --card:rgba(255,255,255,0.04);
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{
+    font-family:'Pretendard',sans-serif;
+    background:linear-gradient(135deg,#0A0A14 0%,#1A1230 50%,#0A0A14 100%);
+    color:var(--text-2); min-height:100vh;
+  }
+  .eng{font-family:'Orbitron',sans-serif;}
+  .wrap{max-width:1180px;margin:0 auto;padding:28px 22px 60px;}
+
+  header{display:flex;align-items:center;gap:14px;margin-bottom:24px;}
+  header .cube{width:34px;height:38px;flex:none;opacity:.9;}
+  header h1{font-family:'Orbitron',sans-serif;font-size:22px;font-weight:900;color:#fff;letter-spacing:.5px;}
+  header h1 .lt{color:var(--purple);}
+  header .badge{font-size:11px;background:rgba(127,79,217,.25);color:#cbb0ff;border:1px solid var(--line);
+    padding:3px 9px;border-radius:6px;margin-left:6px;font-family:'Orbitron',sans-serif;}
+
+  .grid{display:grid;grid-template-columns:340px 1fr;gap:22px;}
+  @media(max-width:820px){.grid{grid-template-columns:1fr;}}
+
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;}
+  .panel h2{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--purple-label);
+    font-family:'Orbitron',sans-serif;margin-bottom:14px;}
+
+  label{display:block;font-size:11px;color:var(--text-muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.05em;}
+  textarea,input{width:100%;background:rgba(10,10,20,.6);border:1px solid var(--line);border-radius:8px;
+    color:#fff;font-size:14px;padding:9px 11px;font-family:inherit;}
+  textarea{min-height:84px;resize:vertical;margin-bottom:12px;}
+  textarea:focus,input:focus{outline:none;border-color:var(--purple);}
+  .params{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;}
+  .field{margin-bottom:0;}
+
+  button{font-family:inherit;cursor:pointer;border:none;border-radius:8px;font-weight:600;transition:.15s;}
+  .btn-main{width:100%;padding:11px;background:var(--purple);color:#fff;font-size:15px;}
+  .btn-main:hover{background:var(--purple-deep);}
+  .btn-main:disabled{background:#2a2440;color:#777;cursor:not-allowed;}
+  .ctrl{display:flex;gap:8px;margin-top:12px;}
+  .ctrl button{flex:1;padding:9px;font-size:13px;border:1px solid var(--line);background:rgba(255,255,255,.05);color:var(--text-2);}
+  .ctrl button:hover{border-color:var(--purple);color:#fff;}
+  .ctrl button.danger:hover{border-color:#ff6b6b;color:#ff9b9b;}
+  .ctrl button:disabled{opacity:.35;cursor:not-allowed;}
+
+  .status-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:13px;}
+  .state-chip{font-family:'Orbitron',sans-serif;font-size:11px;padding:3px 9px;border-radius:6px;border:1px solid var(--line);}
+  .s-running{color:#8cffb0;border-color:rgba(140,255,176,.4);}
+  .s-paused{color:#ffd580;border-color:rgba(255,213,128,.4);}
+  .s-cancelled,.s-error{color:#ff9b9b;border-color:rgba(255,107,107,.4);}
+  .s-idle,.s-done{color:var(--text-muted);}
+  .bar{height:8px;background:rgba(255,255,255,.06);border-radius:5px;overflow:hidden;}
+  .bar > i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--purple-deep),var(--purple));transition:width .3s;}
+  .lock-note{font-size:12px;color:var(--text-dim);margin-top:9px;}
+
+  .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-top:14px;}
+  .thumb{background:rgba(10,10,20,.5);border:1px solid var(--line);border-radius:10px;overflow:hidden;cursor:pointer;transition:.15s;}
+  .thumb:hover{border-color:var(--purple);transform:translateY(-2px);}
+  .thumb img{width:100%;display:block;aspect-ratio:1;object-fit:cover;background:#111;}
+  .thumb .cap{padding:7px 9px;font-size:11px;color:var(--text-muted);}
+  .thumb .cap .src{color:var(--purple);font-family:'Orbitron',sans-serif;font-size:9px;}
+  .empty{color:var(--text-dim);font-size:13px;padding:30px 0;text-align:center;}
+
+  /* 상세 모달 */
+  .modal{position:fixed;inset:0;background:rgba(5,5,12,.85);display:none;align-items:center;justify-content:center;padding:24px;z-index:50;}
+  .modal.on{display:flex;}
+  .modal-box{background:#120e22;border:1px solid var(--line);border-radius:16px;max-width:900px;width:100%;
+    max-height:90vh;overflow:auto;display:grid;grid-template-columns:1fr 280px;gap:0;}
+  @media(max-width:700px){.modal-box{grid-template-columns:1fr;}}
+  .modal-box img{width:100%;display:block;border-radius:16px 0 0 16px;background:#000;}
+  .detail{padding:22px;}
+  .detail h3{font-family:'Orbitron',sans-serif;font-size:13px;color:var(--purple);margin-bottom:14px;}
+  .detail .kv{margin-bottom:11px;}
+  .detail .k{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted);margin-bottom:2px;}
+  .detail .v{font-size:13px;color:#fff;word-break:break-word;}
+  .detail .close{margin-top:16px;width:100%;padding:9px;background:rgba(255,255,255,.06);border:1px solid var(--line);color:var(--text-2);}
+  .err{color:#ff9b9b;font-size:12px;margin-top:10px;display:none;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <svg class="cube" viewBox="0 0 200 220">
+      <polygon points="100,20 180,60 100,100 20,60" fill="rgba(180,122,255,0.22)" stroke="rgba(220,180,255,0.5)" stroke-width="2"/>
+      <polygon points="20,60 100,100 100,200 20,160" fill="rgba(60,30,100,0.28)" stroke="rgba(180,122,255,0.4)" stroke-width="2"/>
+      <polygon points="180,60 100,100 100,200 180,160" fill="rgba(100,50,160,0.28)" stroke="rgba(180,122,255,0.4)" stroke-width="2"/>
+    </svg>
+    <h1 class="eng"><span class="lt">zimage</span>-auto-light <span class="badge" id="modelBadge">model</span></h1>
+  </header>
+
+  <div class="grid">
+    <!-- 왼쪽: 수동 생성 + 자동화 상태 -->
+    <div>
+      <div class="panel" style="margin-bottom:18px;">
+        <h2>Manual Generate</h2>
+        <label>Prompt</label>
+        <textarea id="prompt" placeholder="만들고 싶은 이미지를 설명하세요..."></textarea>
+        <div class="params">
+          <div class="field"><label>Width</label><input id="width" type="number" value="1024" step="64" min="256" max="2048"></div>
+          <div class="field"><label>Height</label><input id="height" type="number" value="1024" step="64" min="256" max="2048"></div>
+          <div class="field"><label>Steps</label><input id="steps" type="number" value="8" min="1" max="50"></div>
+          <div class="field"><label>Seed (빈칸=랜덤)</label><input id="seed" type="number" placeholder="random"></div>
+        </div>
+        <button class="btn-main" id="genBtn" onclick="generate()">생성</button>
+        <div class="lock-note" id="lockNote"></div>
+        <div class="err" id="genErr"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Automation Job</h2>
+        <div class="status-row">
+          <span id="jobCounts">-</span>
+          <span class="state-chip s-idle" id="stateChip">IDLE</span>
+        </div>
+        <div class="bar"><i id="barFill"></i></div>
+        <div id="jobMsg" class="lock-note"></div>
+        <div class="ctrl">
+          <button id="pauseBtn" onclick="jobAction('pause')">일시중지</button>
+          <button id="resumeBtn" onclick="jobAction('resume')">재개</button>
+          <button id="cancelBtn" class="danger" onclick="jobAction('cancel')">취소</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 오른쪽: 생성 이미지 목록 -->
+    <div class="panel">
+      <h2>Generated Images (<span id="imgCount">0</span>)</h2>
+      <div class="gallery" id="gallery"></div>
+      <div class="empty" id="galleryEmpty">아직 생성된 이미지가 없습니다.</div>
+    </div>
+  </div>
+</div>
+
+<!-- 상세 모달 -->
+<div class="modal" id="modal" onclick="if(event.target===this)closeModal()">
+  <div class="modal-box">
+    <img id="mImg" src="" alt="">
+    <div class="detail">
+      <h3 class="eng">IMAGE DETAIL</h3>
+      <div class="kv"><div class="k">Prompt</div><div class="v" id="mPrompt"></div></div>
+      <div class="kv"><div class="k">Seed</div><div class="v" id="mSeed"></div></div>
+      <div class="kv"><div class="k">Size</div><div class="v" id="mSize"></div></div>
+      <div class="kv"><div class="k">Steps</div><div class="v" id="mSteps"></div></div>
+      <div class="kv"><div class="k">Source</div><div class="v" id="mSource"></div></div>
+      <div class="kv"><div class="k">Created</div><div class="v" id="mCreated"></div></div>
+      <button class="close" onclick="closeModal()">닫기</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let metaCache = {};
+
+async function generate(){
+  const errEl = document.getElementById('genErr'); errEl.style.display='none';
+  const body = {
+    prompt: document.getElementById('prompt').value,
+    width: +document.getElementById('width').value,
+    height: +document.getElementById('height').value,
+    num_inference_steps: +document.getElementById('steps').value,
+  };
+  const seed = document.getElementById('seed').value;
+  if(seed!=='') body.seed = +seed;
+  const btn = document.getElementById('genBtn'); btn.disabled=true; btn.textContent='생성 중...';
+  try{
+    const r = await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!r.ok){const e=await r.json();throw new Error(e.detail||'생성 실패');}
+    await refreshImages();
+  }catch(e){ errEl.textContent=e.message; errEl.style.display='block'; }
+  finally{ btn.disabled=false; btn.textContent='생성'; }
+}
+
+async function jobAction(action){
+  await fetch('/api/job/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  await refreshStatus();
+}
+
+async function refreshStatus(){
+  try{
+    const s = await (await fetch('/api/status')).json();
+    const chip = document.getElementById('stateChip');
+    chip.textContent = s.state.toUpperCase();
+    chip.className = 'state-chip s-'+s.state;
+    document.getElementById('jobCounts').textContent = s.total? `${s.completed} / ${s.total}` : '대기 중';
+    document.getElementById('barFill').style.width = s.total? (100*s.completed/s.total)+'%' : '0%';
+    document.getElementById('jobMsg').textContent = s.message || '';
+
+    // 잡 살아있으면(진행/일시중지) 수동 생성 잠금
+    const locked = s.busy;
+    document.getElementById('genBtn').disabled = locked;
+    document.getElementById('lockNote').textContent = locked ? '⏳ 자동화 작업 중 — 수동 생성 잠금' : '';
+    document.getElementById('pauseBtn').disabled  = s.state!=='running';
+    document.getElementById('resumeBtn').disabled = s.state!=='paused';
+    document.getElementById('cancelBtn').disabled = !s.busy;
+  }catch(e){}
+}
+
+async function refreshImages(){
+  try{
+    const list = await (await fetch('/api/images')).json();
+    document.getElementById('imgCount').textContent = list.length;
+    document.getElementById('galleryEmpty').style.display = list.length? 'none':'block';
+    const g = document.getElementById('gallery');
+    g.innerHTML = list.map(m=>{
+      metaCache[m.id]=m;
+      return `<div class="thumb" onclick="openModal(${m.id})">
+        <img src="/api/images/${m.id}/file" loading="lazy">
+        <div class="cap"><span class="src">${m.source.toUpperCase()}</span> · seed ${m.seed}</div>
+      </div>`;
+    }).join('');
+  }catch(e){}
+}
+
+function openModal(id){
+  const m = metaCache[id]; if(!m) return;
+  document.getElementById('mImg').src = '/api/images/'+id+'/file';
+  document.getElementById('mPrompt').textContent = m.prompt || '(없음)';
+  document.getElementById('mSeed').textContent = m.seed;
+  document.getElementById('mSize').textContent = m.width+' × '+m.height;
+  document.getElementById('mSteps').textContent = m.steps;
+  document.getElementById('mSource').textContent = m.source;
+  document.getElementById('mCreated').textContent = m.created;
+  document.getElementById('modal').classList.add('on');
+}
+function closeModal(){ document.getElementById('modal').classList.remove('on'); }
+
+// 모델 배지
+fetch('/api/status').then(()=>{});
+document.getElementById('modelBadge').textContent =
+  (location.search.includes('int8')?'INT8':'') || 'Z-Image';
+
+// 폴링
+refreshStatus(); refreshImages();
+setInterval(refreshStatus, 1500);
+setInterval(refreshImages, 2500);
+</script>
+</body>
+</html>

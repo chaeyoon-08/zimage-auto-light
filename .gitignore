@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 에디터 / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 로컬 테스트 산출물 (생성 이미지·모델 캐시 등 — repo에 올리지 않음)
+outputs/
+hf-cache/
+*.png
+*.safetensors
+*.bin
+
+# 로그·임시
+*.log
+*.tmp
