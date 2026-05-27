@@ -6,5 +6,5 @@ pillow>=10.4.0
 uvicorn[standard]>=0.30.0
 fastapi>=0.115.0
 sdnq>=0.1.2
-# 모델을 빌드 단계에서 받기 위한 CLI + 가속 전송
-huggingface_hub[hf_transfer]>=0.25.0
+# 모델을 빌드 단계에서 받기 위한 CLI (hf download) — v0.34+ 에서 hf CLI 제공
+huggingface_hub>=0.34.0

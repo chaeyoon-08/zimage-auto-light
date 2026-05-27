@@ -48,7 +48,7 @@ RUN python3 -m pip uninstall -y torch torchvision torchaudio && \
 # ── 모델을 빌드 단계에서 이미지에 굽기 ──
 #   Tier3는 배포 후 런타임 다운로드 불가 → 빌드 때 HF 캐시에 미리 받아둠
 RUN mkdir -p ${HF_HUB_CACHE} ${OUTPUT_DIR} && \
-    HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download ${MODEL_REPO}
+    hf download ${MODEL_REPO}
 
 # ── 런타임은 네트워크 없이 캐시에서 로드 (모델 다운로드 발생 X) ──
 ENV HF_HUB_OFFLINE=1 \
