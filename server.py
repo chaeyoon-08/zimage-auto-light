@@ -3,12 +3,13 @@ zimage-auto-light — Z-Image-Turbo 자동 이미지 생성 REST API
 
 동작 요약
 - GPU 1장 → 모든 생성은 gpu_lock으로 직렬화 (동시 충돌 방지)
-- 자동화 잡(③): 환경변수(GEN_COUNT 등)가 있으면 기동 시 자동 시작
-  - 설정값 배열 파일을 읽어 순차(초과 시 처음부터 반복) 또는 랜덤으로 N장 생성
-  - 일시중지 / 재개 / 취소 지원, 취소 시 진행분(이미 저장된 것)은 유지
-- 자동화 잡이 살아있는 동안(진행/일시중지) HTML 수동 생성은 잠금
-- 모든 생성 이미지는 생성 즉시 마운트 저장소(OUTPUT_DIR)에 저장 (→ 취소 시 진행분 자동 보존)
-- 1번 이미지: /api/generate 응답에 base64 포함 (UI 표시용)
+- 수동 생성: 개수=1 즉시 1장(base64), 개수>1 이면 배치 잡으로 전환
+- 자동화 잡(③): 환경변수(GEN_COUNT 등) 있으면 기동 시 자동 시작
+  - 설정값 배열 파일을 순차(초과 시 처음부터 반복) 또는 랜덤으로 N장 생성
+- 잡 일시중지/재개/취소, 취소 시 진행분(이미 저장된 것)은 유지
+- 잡이 살아있는 동안(진행/일시중지) HTML 수동 생성 잠금
+- 모든 생성 이미지는 생성 즉시 OUTPUT_DIR에 저장
+- 리소스 모니터링: /api/resources (VRAM·RAM·GPU사용률·장당시간)
 """
 
 import os
@@ -30,19 +31,30 @@ from sdnq import SDNQConfig  # noqa: F401
 from diffusers import ZImagePipeline
 from PIL import Image
 
+# 선택적 모니터링 라이브러리 (없거나 실패해도 동작에 지장 없게 가드)
+try:
+    import psutil
+except Exception:
+    psutil = None
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    _NVML = True
+except Exception:
+    _NVML = False
+
 # ─────────────────────────────────────────────────────────────
-# 설정 (이미지 내부 고정 / 사용자 입력 환경변수 구분)
+# 설정
 # ─────────────────────────────────────────────────────────────
-# 이미지 내부 고정
 MODEL_REPO = os.getenv("MODEL_REPO", "Disty0/Z-Image-Turbo-SDNQ-uint4-svd-r32")
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "/workspace/outputs"))
-WORK_DIR = Path(os.getenv("WORK_DIR", "/workspace"))  # 마운트 작업 루트 (4단계에서 확정)
+WORK_DIR = Path(os.getenv("WORK_DIR", "/workspace"))
 DEFAULT_WIDTH = int(os.getenv("ZIMG_WIDTH", "1024"))
 DEFAULT_HEIGHT = int(os.getenv("ZIMG_HEIGHT", "1024"))
 DEFAULT_STEPS = int(os.getenv("ZIMG_STEPS", "8"))
 DEFAULT_GUIDANCE = float(os.getenv("ZIMG_GUIDANCE", "0.0"))
 
-# 사용자 입력 환경변수 (워크로드 yml containerEnvs) — 없으면 자동화 꺼짐(수동 모드)
+# 사용자 입력 환경변수 (없으면 자동화 꺼짐 = 수동 모드)
 GEN_COUNT = os.getenv("GEN_COUNT", "").strip()
 CONDITIONS_FILE = os.getenv("CONDITIONS_FILE", "").strip()
 RANDOM_PICK = os.getenv("RANDOM_PICK", "false").strip().lower() in ("1", "true", "yes", "y")
@@ -51,9 +63,7 @@ app = FastAPI(title="zimage-auto-light")
 _INDEX_HTML = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
 
 # ─────────────────────────────────────────────────────────────
-# 모델 로드
-#   - 안정 우선: quantized matmul / torch.compile 사용 안 함 (Blackwell·triton 변수 제거)
-#   - 8GB 메모리 안전: enable_model_cpu_offload
+# 모델 로드 (안정 우선: quantized matmul / torch.compile 미사용, cpu offload)
 # ─────────────────────────────────────────────────────────────
 print(f"[ MODEL ] loading {MODEL_REPO} ...", flush=True)
 pipe = ZImagePipeline.from_pretrained(MODEL_REPO, torch_dtype=torch.bfloat16)
@@ -63,10 +73,11 @@ print("[ MODEL ] ready", flush=True)
 # ─────────────────────────────────────────────────────────────
 # 공유 상태
 # ─────────────────────────────────────────────────────────────
-gpu_lock = threading.Lock()      # 한 번에 하나의 생성만 (GPU 1장)
-IMAGES = []                      # 생성 이미지 메타데이터 (최신이 뒤)
+gpu_lock = threading.Lock()
+IMAGES = []
 IMAGES_LOCK = threading.Lock()
 _seq = 0
+LAST_GEN = {"seconds": None, "peak_vram_mb": None, "device_used_mb": None}
 
 
 def _next_filename(seed: int) -> str:
@@ -77,10 +88,15 @@ def _next_filename(seed: int) -> str:
 
 
 def _run_generation(prompt, width, height, steps, guidance, seed, source):
-    """실제 1장 생성 + 즉시 저장. gpu_lock 안에서만 호출."""
+    """실제 1장 생성 + 즉시 저장 + 리소스 peak 기록. gpu_lock 안에서만 호출."""
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
     generator = torch.Generator().manual_seed(int(seed))
+
+    # 생성 구간 VRAM peak 측정
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    t0 = time.time()
 
     image: Image.Image = pipe(
         prompt=prompt,
@@ -91,10 +107,17 @@ def _run_generation(prompt, width, height, steps, guidance, seed, source):
         generator=generator,
     ).images[0]
 
+    elapsed = time.time() - t0
+    if torch.cuda.is_available():
+        LAST_GEN["seconds"] = round(elapsed, 2)
+        LAST_GEN["peak_vram_mb"] = round(torch.cuda.max_memory_allocated() / 1024**2, 1)
+        free_b, total_b = torch.cuda.mem_get_info()
+        LAST_GEN["device_used_mb"] = round((total_b - free_b) / 1024**2, 1)
+
     filename = _next_filename(seed)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     path = OUTPUT_DIR / filename
-    image.save(path, format="PNG")   # 생성 즉시 저장 → 취소 시 진행분 보존
+    image.save(path, format="PNG")
 
     buf = BytesIO()
     image.save(buf, format="PNG")
@@ -109,7 +132,7 @@ def _run_generation(prompt, width, height, steps, guidance, seed, source):
         "height": height,
         "steps": steps,
         "guidance": guidance,
-        "source": source,                      # "manual" | "auto"
+        "source": source,
         "created": dt.datetime.now().isoformat(timespec="seconds"),
     }
     with IMAGES_LOCK:
@@ -118,11 +141,11 @@ def _run_generation(prompt, width, height, steps, guidance, seed, source):
 
 
 # ─────────────────────────────────────────────────────────────
-# 자동화 잡 관리 (일시중지 / 재개 / 취소)
+# 자동화/배치 잡 (일시중지 / 재개 / 취소)
 # ─────────────────────────────────────────────────────────────
 class JobManager:
     def __init__(self):
-        self.state = "idle"          # idle | running | paused | cancelled | done | error
+        self.state = "idle"      # idle | running | paused | cancelled | done | error
         self.total = 0
         self.completed = 0
         self.message = ""
@@ -139,21 +162,11 @@ class JobManager:
             "busy": self.state in ("running", "paused"),
         }
 
-    def start(self, count, conditions_file, random_pick):
+    def start(self, conditions, count, random_pick):
         if self.state in ("running", "paused"):
-            raise HTTPException(409, "이미 자동화 잡이 진행 중입니다.")
-        # 설정값 파일 로드
-        cpath = Path(conditions_file)
-        if not cpath.is_absolute():
-            cpath = WORK_DIR / conditions_file
-        if not cpath.exists():
-            raise HTTPException(400, f"설정값 파일을 찾을 수 없습니다: {cpath}")
-        try:
-            conditions = json.loads(cpath.read_text(encoding="utf-8"))
-            assert isinstance(conditions, list) and len(conditions) > 0
-        except Exception as e:
-            raise HTTPException(400, f"설정값 파일 파싱 실패: {e}")
-
+            raise HTTPException(409, "이미 작업이 진행 중입니다.")
+        if not isinstance(conditions, list) or len(conditions) == 0:
+            raise HTTPException(400, "조건 목록이 비어 있습니다.")
         self.state = "running"
         self.total = int(count)
         self.completed = 0
@@ -167,8 +180,8 @@ class JobManager:
 
     def _pick(self, conditions, idx, random_pick):
         if random_pick:
-            return random.choice(conditions)        # 랜덤: 중복 허용
-        return conditions[idx % len(conditions)]    # 순차: 초과 시 처음부터 반복
+            return random.choice(conditions)        # 랜덤(중복 허용)
+        return conditions[idx % len(conditions)]    # 순차(초과 시 처음부터 반복)
 
     def _worker(self, conditions, count, random_pick):
         try:
@@ -177,12 +190,11 @@ class JobManager:
                     self.state = "cancelled"
                     self.message = f"{self.completed}장 생성 후 취소됨"
                     return
-                self._resume.wait()                 # 일시중지면 여기서 대기
+                self._resume.wait()
                 if self._cancel.is_set():
                     self.state = "cancelled"
                     self.message = f"{self.completed}장 생성 후 취소됨"
                     return
-
                 c = self._pick(conditions, i, random_pick)
                 with gpu_lock:
                     _run_generation(
@@ -214,10 +226,24 @@ class JobManager:
     def cancel(self):
         if self.state in ("running", "paused"):
             self._cancel.set()
-            self._resume.set()   # 일시중지 대기 해제
+            self._resume.set()
 
 
 job = JobManager()
+
+
+def _load_conditions_file(name):
+    cpath = Path(name)
+    if not cpath.is_absolute():
+        cpath = WORK_DIR / name
+    if not cpath.exists():
+        raise HTTPException(400, f"설정값 파일을 찾을 수 없습니다: {cpath}")
+    try:
+        data = json.loads(cpath.read_text(encoding="utf-8"))
+        assert isinstance(data, list) and len(data) > 0
+        return data
+    except Exception as e:
+        raise HTTPException(400, f"설정값 파일 파싱 실패: {e}")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -227,7 +253,8 @@ job = JobManager()
 def _maybe_autostart():
     if GEN_COUNT and CONDITIONS_FILE:
         try:
-            job.start(GEN_COUNT, CONDITIONS_FILE, RANDOM_PICK)
+            conds = _load_conditions_file(CONDITIONS_FILE)
+            job.start(conds, int(GEN_COUNT), RANDOM_PICK)
             print(f"[ AUTO  ] 자동화 시작: {GEN_COUNT}장 / {CONDITIONS_FILE} / random={RANDOM_PICK}", flush=True)
         except Exception as e:
             print(f"[ AUTO  ] 자동화 시작 실패: {e}", flush=True)
@@ -251,15 +278,27 @@ def generate(
     num_inference_steps: int = Body(DEFAULT_STEPS),
     guidance_scale: float = Body(DEFAULT_GUIDANCE),
     seed: int = Body(None),
+    count: int = Body(1),
 ):
-    # 자동화 잡이 살아있으면(진행/일시중지) 수동 생성 잠금
     if job.state in ("running", "paused"):
-        raise HTTPException(409, "자동화 작업 중에는 수동 생성을 할 수 없습니다.")
+        raise HTTPException(409, "작업 중에는 수동 생성을 할 수 없습니다.")
+
+    cond = {
+        "prompt": prompt, "width": width, "height": height,
+        "steps": num_inference_steps, "guidance": guidance_scale, "seed": seed,
+    }
+
+    # 개수>1 → 배치 잡으로 전환 (같은 프롬프트, seed 미지정이면 매번 랜덤 → 다양한 결과)
+    if count and count > 1:
+        job.start([cond], int(count), random_pick=False)
+        return JSONResponse({"mode": "job", "status": job.status()})
+
+    # 개수=1 → 즉시 1장
     with gpu_lock:
         meta, b64 = _run_generation(
             prompt, width, height, num_inference_steps, guidance_scale, seed, "manual"
         )
-    return JSONResponse({"image_base64": b64, "meta": meta})
+    return JSONResponse({"mode": "single", "image_base64": b64, "meta": meta})
 
 
 @app.get("/api/status")
@@ -273,13 +312,13 @@ def job_start(
     conditions_file: str = Body(None),
     random_pick: bool = Body(None),
 ):
-    # 본문 값이 없으면 환경변수 기본값 사용
     c = count if count is not None else (int(GEN_COUNT) if GEN_COUNT else 0)
     f = conditions_file if conditions_file is not None else CONDITIONS_FILE
     r = random_pick if random_pick is not None else RANDOM_PICK
     if not c or not f:
         raise HTTPException(400, "count 와 conditions_file 이 필요합니다.")
-    job.start(c, f, r)
+    conds = _load_conditions_file(f)
+    job.start(conds, c, r)
     return job.status()
 
 
@@ -301,10 +340,48 @@ def job_cancel():
     return job.status()
 
 
+@app.get("/api/resources")
+def resources():
+    out = {"gpu": None, "ram": None, "last_gen": LAST_GEN}
+    # GPU VRAM (torch)
+    if torch.cuda.is_available():
+        free_b, total_b = torch.cuda.mem_get_info()
+        gpu = {
+            "vram_used_mb": round((total_b - free_b) / 1024**2, 1),
+            "vram_total_mb": round(total_b / 1024**2, 1),
+            "util_percent": None,
+        }
+        if _NVML:
+            try:
+                h = pynvml.nvmlDeviceGetHandleByIndex(0)
+                gpu["util_percent"] = pynvml.nvmlDeviceGetUtilizationRates(h).gpu
+            except Exception:
+                pass
+        out["gpu"] = gpu
+    # 시스템 RAM
+    if psutil is not None:
+        vm = psutil.virtual_memory()
+        out["ram"] = {
+            "used_mb": round(vm.used / 1024**2, 1),
+            "total_mb": round(vm.total / 1024**2, 1),
+            "percent": vm.percent,
+        }
+    return out
+
+
+@app.get("/api/model")
+def model_info():
+    repo = MODEL_REPO
+    base = repo.split("/")[-1].split("-SDNQ")[0]   # 예: "Z-Image-Turbo"
+    low = repo.lower()
+    dtype = next((d for d in ("uint4", "int8", "int4", "uint8", "fp8") if d in low), "?")
+    return {"repo": repo, "name": base, "dtype": dtype}
+
+
 @app.get("/api/images")
 def list_images():
     with IMAGES_LOCK:
-        return list(reversed(IMAGES))   # 최신 먼저
+        return list(reversed(IMAGES))
 
 
 @app.get("/api/images/{image_id}/file")
