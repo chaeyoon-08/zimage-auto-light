@@ -1,8 +1,9 @@
 # zimage-auto-light — Z-Image-Turbo 자동 이미지 생성 REST API (gcube 워크로드용)
-# 베이스: CUDA 12.8 + cudnn runtime → runtime 으로 변경
-#   - torch cu128 휠이 cuDNN을 자체 번들하므로 시스템 cudnn(약 1.1GB) 불필요
+# 베이스: CUDA 12.8 base (runtime/cudnn 아님)
+#   - torch cu128 휠이 cuDNN·cuBLAS·cuFFT 등 CUDA 라이브러리를 모두 자체 번들
+#     → 시스템 CUDA 수학 라이브러리(약 3GB) 불필요 → base 로 최소화
 #   - 지시받은 CUDA 12.8 기준 / RTX 5060·5090(Blackwell) 충족
-FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.0-base-ubuntu22.04
 
 ARG MODEL_REPO=Disty0/Z-Image-Turbo-SDNQ-uint4-svd-r32
 
@@ -15,7 +16,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     HF_HUB_CACHE=/app/hf-cache \
     MODEL_REPO=${MODEL_REPO} \
-    OUTPUT_DIR=/workspace/outputs \
+    OUTPUT_DIR=/outputs \
     PORT=8000 \
     ZIMG_WIDTH=1024 \
     ZIMG_HEIGHT=1024 \
@@ -35,7 +36,12 @@ WORKDIR /app
 #   torchaudio는 이미지 생성에 불필요 → 제외 (torch + torchvision 만)
 RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
     python3 -m pip install --no-cache-dir torch torchvision \
-      --index-url https://download.pytorch.org/whl/cu128
+      --index-url https://download.pytorch.org/whl/cu128 && \
+    (python3 -m pip uninstall -y pytorch-triton triton nvidia-nccl-cu12 || true)
+# ↑ 미사용 패키지 제거 (같은 레이어여야 실제 용량 감소):
+#   - nvidia-nccl-cu12 : 다중 GPU 분산통신용. 우리는 레플리카당 단일 GPU → 미사용
+#   - triton           : torch.compile/inductor용. SDNQ가 eager fallback("Triton not available")로
+#                        동작 확인됨 → 미사용. (|| true: 없으면 무시, torch 설치 실패는 그대로 빌드 실패)
 
 # ── ② 앱 의존성 + diffusers(소스) 설치, 캐시·pycache 정리(같은 레이어) ──
 COPY requirements.txt /app/requirements.txt
@@ -45,7 +51,7 @@ RUN python3 -m pip install --no-cache-dir -r /app/requirements.txt && \
     rm -rf /root/.cache /tmp/*
 
 # ── ③ 모델을 빌드 단계에서 굽기 (Tier3 런타임 다운로드 불가 대응) ──
-RUN mkdir -p ${HF_HUB_CACHE} ${OUTPUT_DIR} && \
+RUN mkdir -p ${HF_HUB_CACHE} ${OUTPUT_DIR}/auto ${OUTPUT_DIR}/manual && \
     hf download ${MODEL_REPO} && \
     rm -rf /root/.cache /tmp/*
 
@@ -56,6 +62,7 @@ ENV HF_HUB_OFFLINE=1 \
 # ── 애플리케이션 파일 ──
 COPY server.py /app/server.py
 COPY index.html /app/index.html
+COPY static/ /app/static/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

@@ -3,17 +3,21 @@ zimage-auto-light — Z-Image-Turbo 자동 이미지 생성 REST API (분산/레
 
 레플리카 구조
 - 각 레플리카(파드)는 독립 컨테이너. 자기 server·모델·GPU·메모리를 가짐
-- 유일한 공유 지점은 마운트된 작업 폴더(WORK_DIR=/workspace)
+- 유일한 공유 지점은 마운트된 작업 폴더(WORK_DIR=/workspace) 와 보존 폴더(OUTPUT_DIR=/outputs)
 - 레플리카 식별 = 파드 이름(hostname)
 
 폴더 역할 분리 (A방식)
-- OUTPUT_DIR (/workspace/outputs)       : 보존용. 실제 PNG 전부 쌓임(아카이브)
+- OUTPUT_DIR (/outputs)  : 보존용. 실제 PNG 전부 쌓임(아카이브). /workspace 밖 별도 마운트
+    - /outputs/auto/     : 자동화(환경변수 GEN_COUNT) 생성분
+    - /outputs/manual/   : UI 수동 테스트 생성분
 - CURRENT_DIR (/workspace/current/run_<RUN_ID>) : UI 렌더링용(이번 실행만)
-    - <id>.json          : 이미지 메타(프롬프트·seed·replica + 보존 PNG 경로). 가벼움
-    - status/<pod>.json  : 레플리카 하트비트(VRAM·RAM·util·생성수·잡상태)
+    - <id>.json              : 이미지 메타(프롬프트·seed·replica·source·config + 보존 PNG 경로). 가벼움
+    - status/<pod>.json      : 레플리카 하트비트(현재 스냅샷)
+    - history/<pod>.recent.jsonl : 시계열 로우데이터(최근, 10초 간격)
+    - history/<pod>.rollup.jsonl : 시계열 압축(1분 평균, 장기 보존)
 - UI는 CURRENT_DIR만 스캔 → 이전 작업물과 안 섞임. 어느 레플리카가 응답하든 같은 폴더라 일관
 
-이미지 저장: PNG는 OUTPUT_DIR에 1번만(용량 중복 X), 메타 json만 CURRENT_DIR에 → 둘 분리
+이미지 저장: PNG는 OUTPUT_DIR(auto|manual)에 1번만(용량 중복 X), 메타 json만 CURRENT_DIR에 → 둘 분리
 """
 
 import os
@@ -23,11 +27,13 @@ import socket
 import random
 import threading
 import datetime as dt
+from collections import deque
 from pathlib import Path
 
 import torch
 from fastapi import FastAPI, Body, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from sdnq import SDNQConfig  # noqa: F401  (SDNQ 로더 등록)
 from diffusers import ZImagePipeline
@@ -49,12 +55,16 @@ except Exception:
 # ─────────────────────────────────────────────────────────────
 MODEL_REPO = os.getenv("MODEL_REPO", "Disty0/Z-Image-Turbo-SDNQ-uint4-svd-r32")
 WORK_DIR = Path(os.getenv("WORK_DIR", "/workspace"))
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(WORK_DIR / "outputs")))   # 보존(아카이브)
+OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "/outputs"))   # /workspace 밖 별도 마운트
+OUTPUT_AUTO_DIR = OUTPUT_DIR / "auto"      # 자동화 생성 PNG
+OUTPUT_MANUAL_DIR = OUTPUT_DIR / "manual"  # UI 수동 테스트 생성 PNG
 RUN_ID = os.getenv("RUN_ID", "default").strip() or "default"
-CURRENT_DIR = WORK_DIR / "current" / f"run_{RUN_ID}"                    # UI 렌더링용
+CURRENT_DIR = WORK_DIR / "current" / f"run_{RUN_ID}"   # UI 렌더링용
 STATUS_DIR = CURRENT_DIR / "status"
+HISTORY_DIR = CURRENT_DIR / "history"
 
 REPLICA_ID = socket.gethostname()   # 파드 이름
+STARTED_AT = dt.datetime.now()      # 레플리카 시작 시각 (uptime용)
 
 DEFAULT_WIDTH = int(os.getenv("ZIMG_WIDTH", "1024"))
 DEFAULT_HEIGHT = int(os.getenv("ZIMG_HEIGHT", "1024"))
@@ -65,17 +75,27 @@ GEN_COUNT = os.getenv("GEN_COUNT", "").strip()
 CONDITIONS_FILE = os.getenv("CONDITIONS_FILE", "").strip()
 RANDOM_PICK = os.getenv("RANDOM_PICK", "false").strip().lower() in ("1", "true", "yes", "y")
 
-VRAM_LIMIT_GB = float(os.getenv("VRAM_LIMIT_GB", "8"))  # 대시보드 빨강 임계값
+STALE_SECONDS = float(os.getenv("STALE_SECONDS", "30"))  # 이 시간 넘게 갱신 없으면 죽은 레플리카로 간주
+HEARTBEAT_SEC = float(os.getenv("HEARTBEAT_SEC", "3"))    # status 갱신 주기
+HISTORY_SEC = float(os.getenv("HISTORY_SEC", "10"))       # 시계열 로우데이터 샘플 주기
+RECENT_KEEP = int(os.getenv("RECENT_KEEP", "180"))        # recent 보관 점수 (10s×180=30분)
+ROLLUP_KEEP = int(os.getenv("ROLLUP_KEEP", "2880"))       # rollup 보관 점수 (1min×2880=48시간)
+STAT_KEEP = 1000                                          # 생성시간/VRAM 통계 표본 보관 수
 
 app = FastAPI(title="zimage-auto-light")
 _INDEX_HTML = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
 
-for d in (OUTPUT_DIR, CURRENT_DIR, STATUS_DIR):
+# 정적 파일(css/js/logo) 서빙 — index.html 이 /static/* 로 참조
+_STATIC_DIR = Path(__file__).parent / "static"
+if _STATIC_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+for d in (OUTPUT_DIR, OUTPUT_AUTO_DIR, OUTPUT_MANUAL_DIR, CURRENT_DIR, STATUS_DIR, HISTORY_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 print(f"[ INFO ] REPLICA(pod) = {REPLICA_ID}", flush=True)
 print(f"[ INFO ] RUN_ID = {RUN_ID}", flush=True)
-print(f"[ INFO ] OUTPUT_DIR(보존) = {OUTPUT_DIR}", flush=True)
+print(f"[ INFO ] OUTPUT_DIR(보존) = {OUTPUT_DIR}  (auto/ , manual/)", flush=True)
 print(f"[ INFO ] CURRENT_DIR(UI)  = {CURRENT_DIR}", flush=True)
 
 # ─────────────────────────────────────────────────────────────
@@ -94,6 +114,15 @@ _seq = 0
 _seq_lock = threading.Lock()
 MY_GENERATED = 0      # 이 레플리카가 만든 장 수
 LAST_GEN = {"seconds": None, "peak_vram_mb": None, "device_used_mb": None}
+GEN_TIMES = deque(maxlen=STAT_KEEP)   # 생성 소요시간(초) 표본
+VRAM_PEAKS = deque(maxlen=STAT_KEEP)  # 생성 VRAM peak(GB) 표본
+
+
+def _stat(seq):
+    """표본 리스트 → (평균, 최소, 최대). 비어있으면 (None,None,None)."""
+    if not seq:
+        return None, None, None
+    return round(sum(seq) / len(seq), 2), round(min(seq), 2), round(max(seq), 2)
 
 
 def _gpu_snapshot():
@@ -125,7 +154,7 @@ def _next_seq():
         return _seq
 
 
-def _run_generation(prompt, width, height, steps, guidance, seed, source):
+def _run_generation(prompt, width, height, steps, guidance, seed, source, config_file=None):
     """1장 생성 → PNG는 OUTPUT_DIR(보존), 메타는 CURRENT_DIR(UI). gpu_lock 안에서 호출."""
     global MY_GENERATED
     if seed is None:
@@ -141,29 +170,44 @@ def _run_generation(prompt, width, height, steps, guidance, seed, source):
         num_inference_steps=steps, guidance_scale=guidance, generator=generator,
     ).images[0]
 
-    elapsed = time.time() - t0
+    elapsed = round(time.time() - t0, 2)
+    peak_gb = None
     if torch.cuda.is_available():
-        LAST_GEN["seconds"] = round(elapsed, 2)
-        LAST_GEN["peak_vram_mb"] = round(torch.cuda.max_memory_allocated() / 1024**2, 1)
+        peak_gb = round(torch.cuda.max_memory_allocated() / 1024**3, 2)
+        LAST_GEN["seconds"] = elapsed
+        LAST_GEN["peak_vram_mb"] = round(peak_gb * 1024, 1)
         free_b, total_b = torch.cuda.mem_get_info()
         LAST_GEN["device_used_mb"] = round((total_b - free_b) / 1024**2, 1)
+    GEN_TIMES.append(elapsed)
+    if peak_gb is not None:
+        VRAM_PEAKS.append(peak_gb)
 
     seq = _next_seq()
     ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     stem = f"{REPLICA_ID}_{ts}_{seq:05d}_seed{seed}"
 
-    # PNG → 보존 폴더에만
-    png_path = OUTPUT_DIR / f"{stem}.png"
+    # PNG → 보존 폴더(source별): auto / manual
+    sub = "manual" if source == "manual" else "auto"
+    png_dir = OUTPUT_MANUAL_DIR if sub == "manual" else OUTPUT_AUTO_DIR
+    png_path = png_dir / f"{stem}.png"
     image.save(png_path, format="PNG")
+    try:
+        size_bytes = png_path.stat().st_size
+    except Exception:
+        size_bytes = None
 
     # 메타 → UI 폴더 (가벼움, 실제 PNG 경로 포함)
     meta = {
         "id": stem,
         "png": str(png_path),
+        "png_sub": sub,                 # auto | manual (서빙·필터용)
+        "size_bytes": size_bytes,
         "replica": REPLICA_ID,
         "prompt": prompt, "seed": int(seed),
         "width": width, "height": height, "steps": steps, "guidance": guidance,
-        "source": source,
+        "source": source,               # auto | manual
+        "config_file": config_file,     # AUTO일 때 사용한 conditions 파일명 (MANUAL이면 None)
+        "run_id": RUN_ID,
         "created": dt.datetime.now().isoformat(timespec="seconds"),
     }
     try:
@@ -184,29 +228,35 @@ class JobManager:
         self.total = 0
         self.completed = 0
         self.message = ""
+        self.config_file = None
         self._cancel = threading.Event()
         self._resume = threading.Event()
         self._thread = None
 
     def status(self):
         return {"state": self.state, "total": self.total, "completed": self.completed,
-                "message": self.message, "busy": self.state in ("running", "paused")}
+                "message": self.message, "config_file": self.config_file,
+                "busy": self.state in ("running", "paused")}
 
-    def start(self, conditions, count, random_pick):
+    def start(self, conditions, count, random_pick, config_file=None):
         if self.state in ("running", "paused"):
             raise HTTPException(409, "이미 작업이 진행 중입니다.")
         if not isinstance(conditions, list) or not conditions:
             raise HTTPException(400, "조건 목록이 비어 있습니다.")
-        self.state = "running"; self.total = int(count); self.completed = 0; self.message = ""
+        self.state = "running"; self.total = int(count); self.completed = 0
+        self.message = ""; self.config_file = config_file
         self._cancel.clear(); self._resume.set()
         self._thread = threading.Thread(target=self._worker,
-                                        args=(conditions, int(count), bool(random_pick)), daemon=True)
+                                        args=(conditions, int(count), bool(random_pick), config_file),
+                                        daemon=True)
         self._thread.start()
 
     def _pick(self, conds, idx, rnd):
         return random.choice(conds) if rnd else conds[idx % len(conds)]
 
-    def _worker(self, conds, count, rnd):
+    def _worker(self, conds, count, rnd, config_file):
+        # config_file 이 있으면 source=auto(자동화), 없으면 manual(개수>1 수동)
+        src = "auto" if config_file else "manual"
         try:
             for i in range(count):
                 if self._cancel.is_set():
@@ -218,7 +268,8 @@ class JobManager:
                 with gpu_lock:
                     _run_generation(c.get("prompt", ""), int(c.get("width", DEFAULT_WIDTH)),
                                     int(c.get("height", DEFAULT_HEIGHT)), int(c.get("steps", DEFAULT_STEPS)),
-                                    float(c.get("guidance", DEFAULT_GUIDANCE)), c.get("seed"), "auto")
+                                    float(c.get("guidance", DEFAULT_GUIDANCE)), c.get("seed"),
+                                    src, config_file)
                 self.completed += 1
             self.state = "done"; self.message = f"{self.completed}장 완료"
         except Exception as e:
@@ -245,40 +296,52 @@ def _load_conditions_file(name):
     if not p.is_absolute():
         p = WORK_DIR / name
     if not p.exists():
-        raise HTTPException(400, f"설정값 파일을 찾을 수 없습니다: {p}")
+        raise HTTPException(400, f"CONFIG 파일을 찾을 수 없습니다: {p}")
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
         assert isinstance(data, list) and data
         return data
     except Exception as e:
-        raise HTTPException(400, f"설정값 파일 파싱 실패: {e}")
+        raise HTTPException(400, f"CONFIG 파일 파싱 실패: {e}")
 
 
 # ─────────────────────────────────────────────────────────────
-# 하트비트: status/<pod>.json 주기적 기록
+# 하트비트: status/<pod>.json (현재 스냅샷)
 # ─────────────────────────────────────────────────────────────
-def _write_heartbeat():
+def _status_payload():
     snap = _gpu_snapshot()
     js = job.status()
-    peak_gb = round(LAST_GEN["peak_vram_mb"] / 1024, 2) if LAST_GEN["peak_vram_mb"] else None
-    data = {
+    avg_s, min_s, max_s = _stat(GEN_TIMES)
+    vram_avg, _vmin, vram_peak = _stat(VRAM_PEAKS)
+    now = dt.datetime.now()
+    return {
         "replica": REPLICA_ID,
-        "updated": dt.datetime.now().isoformat(timespec="seconds"),
+        "updated": now.isoformat(timespec="seconds"),
+        "started_at": STARTED_AT.isoformat(timespec="seconds"),
+        "uptime_s": int((now - STARTED_AT).total_seconds()),
         "vram_used_gb": snap["vram_used_gb"],
         "vram_total_gb": snap["vram_total_gb"],
-        "vram_peak_gb": peak_gb,          # 최근 생성 peak (8GB 판단 기준)
+        "vram_peak_gb": vram_peak,           # 생성 VRAM peak (빨강 판단 기준)
+        "vram_avg_gb": vram_avg,             # 생성 VRAM 평균
         "ram_used_gb": snap["ram_used_gb"],
         "ram_total_gb": snap["ram_total_gb"],
         "util": snap["util"],
         "generated": MY_GENERATED,
         "last_gen_s": LAST_GEN["seconds"],
+        "avg_gen_s": avg_s,                  # 평균 생성 시간
+        "min_gen_s": min_s,                  # 최단
+        "max_gen_s": max_s,                  # 최장
         "job_state": js["state"],
         "job_total": js["total"],
         "job_completed": js["completed"],
-        "vram_limit_gb": VRAM_LIMIT_GB,
+        "config_file": js["config_file"],
     }
+
+
+def _write_heartbeat():
     try:
-        (STATUS_DIR / f"{REPLICA_ID}.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        (STATUS_DIR / f"{REPLICA_ID}.json").write_text(
+            json.dumps(_status_payload(), ensure_ascii=False), encoding="utf-8")
     except Exception as e:
         print(f"[ WARN ] 하트비트 실패: {e}", flush=True)
 
@@ -286,7 +349,86 @@ def _write_heartbeat():
 def _heartbeat_loop():
     while True:
         _write_heartbeat()
-        time.sleep(3)
+        time.sleep(HEARTBEAT_SEC)
+
+
+# ─────────────────────────────────────────────────────────────
+# 시계열: recent(로우, 10초) + rollup(1분 평균, 장기)
+# ─────────────────────────────────────────────────────────────
+_recent = deque(maxlen=RECENT_KEEP)
+_minute_buf = []          # 현재 1분 구간 샘플
+_minute_key = None        # 현재 분(YYYYmmddHHMM)
+RECENT_FILE = HISTORY_DIR / f"{REPLICA_ID}.recent.jsonl"
+ROLLUP_FILE = HISTORY_DIR / f"{REPLICA_ID}.rollup.jsonl"
+
+
+def _avg(vals):
+    vals = [v for v in vals if v is not None]
+    return round(sum(vals) / len(vals), 2) if vals else None
+
+
+def _history_sample():
+    """10초마다 호출: recent 갱신 + 1분 단위로 rollup 누적."""
+    global _minute_key
+    snap = _gpu_snapshot()
+    now = dt.datetime.now()
+    point = {"t": now.isoformat(timespec="seconds"),
+             "vram": snap["vram_used_gb"], "util": snap["util"], "ram": snap["ram_used_gb"]}
+    _recent.append(point)
+    # recent 파일은 작으니 매번 덮어쓰기
+    try:
+        RECENT_FILE.write_text("\n".join(json.dumps(p) for p in _recent), encoding="utf-8")
+    except Exception:
+        pass
+
+    # 분 단위 롤업
+    mkey = now.strftime("%Y%m%d%H%M")
+    if _minute_key is None:
+        _minute_key = mkey
+    if mkey != _minute_key and _minute_buf:
+        agg = {"t": _minute_key,
+               "vram": _avg([s["vram"] for s in _minute_buf]),
+               "util": _avg([s["util"] for s in _minute_buf]),
+               "ram": _avg([s["ram"] for s in _minute_buf])}
+        _append_rollup(agg)
+        _minute_buf.clear()
+        _minute_key = mkey
+    _minute_buf.append(point)
+
+
+def _append_rollup(agg):
+    try:
+        lines = []
+        if ROLLUP_FILE.exists():
+            lines = ROLLUP_FILE.read_text(encoding="utf-8").splitlines()
+        lines.append(json.dumps(agg))
+        if len(lines) > ROLLUP_KEEP:
+            lines = lines[-ROLLUP_KEEP:]
+        ROLLUP_FILE.write_text("\n".join(lines), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _history_loop():
+    while True:
+        _history_sample()
+        time.sleep(HISTORY_SEC)
+
+
+def _read_jsonl(path):
+    out = []
+    try:
+        if path.exists():
+            for ln in path.read_text(encoding="utf-8").splitlines():
+                ln = ln.strip()
+                if ln:
+                    try:
+                        out.append(json.loads(ln))
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+    return out
 
 
 # ─────────────────────────────────────────────────────────────
@@ -295,11 +437,12 @@ def _heartbeat_loop():
 @app.on_event("startup")
 def _startup():
     threading.Thread(target=_heartbeat_loop, daemon=True).start()
+    threading.Thread(target=_history_loop, daemon=True).start()
     _write_heartbeat()
     if GEN_COUNT and CONDITIONS_FILE:
         try:
             conds = _load_conditions_file(CONDITIONS_FILE)
-            job.start(conds, int(GEN_COUNT), RANDOM_PICK)
+            job.start(conds, int(GEN_COUNT), RANDOM_PICK, config_file=CONDITIONS_FILE)
             print(f"[ AUTO ] 자동화 시작: {GEN_COUNT}장 / {CONDITIONS_FILE} / random={RANDOM_PICK}", flush=True)
         except Exception as e:
             print(f"[ AUTO ] 자동화 시작 실패: {e}", flush=True)
@@ -326,14 +469,15 @@ def generate(
     count: int = Body(1),
 ):
     if job.state in ("running", "paused"):
-        raise HTTPException(409, "작업 중에는 수동 생성을 할 수 없습니다.")
+        raise HTTPException(409, "진행 중인 작업이 있습니다. 일시중지 후 취소하신 다음 다시 진행해주세요.")
     cond = {"prompt": prompt, "width": width, "height": height,
             "steps": num_inference_steps, "guidance": guidance_scale, "seed": seed}
     if count and count > 1:
-        job.start([cond], int(count), random_pick=False)
+        job.start([cond], int(count), random_pick=False, config_file=None)  # 수동 다량
         return JSONResponse({"mode": "job", "status": job.status()})
     with gpu_lock:
-        meta = _run_generation(prompt, width, height, num_inference_steps, guidance_scale, seed, "manual")
+        meta = _run_generation(prompt, width, height, num_inference_steps,
+                               guidance_scale, seed, "manual", config_file=None)
     return JSONResponse({"mode": "single", "meta": meta})
 
 
@@ -349,7 +493,7 @@ def job_start(count: int = Body(None), conditions_file: str = Body(None), random
     r = random_pick if random_pick is not None else RANDOM_PICK
     if not c or not f:
         raise HTTPException(400, "count 와 conditions_file 이 필요합니다.")
-    job.start(_load_conditions_file(f), c, r)
+    job.start(_load_conditions_file(f), c, r, config_file=f)
     return job.status()
 
 
@@ -370,9 +514,18 @@ def job_cancel():
 
 @app.get("/api/resources")
 def resources():
-    """이 레플리카의 실시간 자원 + 최근 생성 기록."""
+    """이 레플리카(응답한 레플리카)의 현재 자원 + 생성 통계."""
     snap = _gpu_snapshot()
-    return {"replica": REPLICA_ID, "gpu": snap, "last_gen": LAST_GEN, "vram_limit_gb": VRAM_LIMIT_GB}
+    avg_s, min_s, max_s = _stat(GEN_TIMES)
+    vram_avg, _vmin, vram_peak = _stat(VRAM_PEAKS)
+    return {
+        "replica": REPLICA_ID,
+        "gpu": snap,
+        "last_gen": LAST_GEN,
+        "gen_avg_s": avg_s, "gen_min_s": min_s, "gen_max_s": max_s,
+        "vram_avg_gb": vram_avg, "vram_peak_gb": vram_peak,
+        "generated": MY_GENERATED,
+    }
 
 
 @app.get("/api/conditions")
@@ -397,33 +550,66 @@ def model_info():
 
 @app.get("/api/replicas")
 def list_replicas():
-    """CURRENT_DIR/status 스캔 → 모든 레플리카 현황 (대시보드용)."""
+    """CURRENT_DIR/status 스캔 → 살아있는 레플리카 현황 (대시보드용).
+
+    살아있는 판단 = 하트비트(updated)가 STALE_SECONDS 이내에 갱신됨.
+    죽은 파드는 status 파일이 남아도 갱신이 멈추므로 stale 로 걸러냄.
+    파일 mtime 도 함께 보아 시계 오차/동기화 지연을 보완.
+    include_stale=True 면 죽은 것도 포함(_stale 플래그 표시).
+    """
+    return _replicas(include_stale=False)
+
+
+@app.get("/api/replicas_all")
+def list_replicas_all():
+    """죽은 레플리카까지 포함 (대시보드 '죽은 레플리카 포함' 옵션용)."""
+    return _replicas(include_stale=True)
+
+
+def _replicas(include_stale=False):
+    now = dt.datetime.now()
     reps = []
     try:
         for p in STATUS_DIR.glob("*.json"):
             try:
-                reps.append(json.loads(p.read_text(encoding="utf-8")))
+                r = json.loads(p.read_text(encoding="utf-8"))
             except Exception:
                 continue
+            age = None
+            try:
+                age = (now - dt.datetime.fromisoformat(r.get("updated"))).total_seconds()
+            except Exception:
+                pass
+            try:
+                mtime_age = time.time() - p.stat().st_mtime
+                age = mtime_age if age is None else min(age, mtime_age)
+            except Exception:
+                pass
+            r["_age_s"] = round(age, 1) if age is not None else None
+            r["_stale"] = (age is not None and age > STALE_SECONDS)
+            if r["_stale"] and not include_stale:
+                continue
+            reps.append(r)
     except Exception:
         pass
     reps.sort(key=lambda r: r.get("replica", ""))
-    # 합산
-    total_gen = sum(r.get("generated", 0) or 0 for r in reps)
-    running = [r for r in reps if r.get("job_state") == "running"]
-    utils = [r.get("util") for r in reps if r.get("util") is not None]
+    alive = [r for r in reps if not r.get("_stale")]
+    total_gen = sum(r.get("generated", 0) or 0 for r in alive)
+    running = [r for r in alive if r.get("job_state") == "running"]
+    utils = [r.get("util") for r in alive if r.get("util") is not None]
     summary = {
-        "replicas": len(reps),
+        "replicas": len(alive),
         "total_generated": total_gen,
         "running": len(running),
         "avg_util": round(sum(utils) / len(utils)) if utils else None,
     }
-    return {"run_id": RUN_ID, "summary": summary, "replicas": reps}
+    return {"run_id": RUN_ID, "summary": summary, "replicas": reps, "stale_seconds": STALE_SECONDS}
 
 
 @app.get("/api/images")
-def list_images(replica: str = None, limit: int = 500):
-    """CURRENT_DIR의 메타 json 스캔 → 이번 실행 이미지 목록 (최근순). replica 필터 옵션."""
+def list_images(replica: str = None, source: str = None, limit: int = 500):
+    """CURRENT_DIR의 메타 json 스캔 → 이번 실행 이미지 목록 (최근순).
+    replica 필터(파드 이름), source 필터(auto|manual) 옵션."""
     metas = []
     try:
         files = sorted(CURRENT_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -436,6 +622,8 @@ def list_images(replica: str = None, limit: int = 500):
                 continue
             if replica and m.get("replica") != replica:
                 continue
+            if source and (m.get("png_sub") or m.get("source")) != source:
+                continue
             metas.append(m)
     except Exception:
         pass
@@ -444,8 +632,43 @@ def list_images(replica: str = None, limit: int = 500):
 
 @app.get("/api/images/{image_id}/file")
 def image_file(image_id: str):
-    """보존 폴더(OUTPUT_DIR)의 실제 PNG 서빙. 어느 레플리카든 공유 폴더라 서빙 가능."""
-    path = OUTPUT_DIR / f"{image_id}.png"
-    if not path.exists():
-        raise HTTPException(404, "파일이 없습니다.")
-    return FileResponse(path, media_type="image/png")
+    """보존 폴더의 실제 PNG 서빙. auto/manual 하위폴더(+레거시 ui/루트)에서 탐색.
+    어느 레플리카든 공유 폴더라 서빙 가능."""
+    for d in (OUTPUT_AUTO_DIR, OUTPUT_MANUAL_DIR, OUTPUT_DIR / "ui", OUTPUT_DIR):
+        path = d / f"{image_id}.png"
+        if path.exists():
+            return FileResponse(path, media_type="image/png")
+    raise HTTPException(404, "파일이 없습니다.")
+
+
+@app.get("/api/replica/{replica_id}/history")
+def replica_history(replica_id: str, range: str = "live"):
+    """레플리카 시계열. range=live(recent 로우) | 1h | 6h | all (rollup 압축).
+    공유 폴더라 어느 레플리카가 응답하든 해당 replica_id 파일을 읽어 제공."""
+    recent = _read_jsonl(HISTORY_DIR / f"{replica_id}.recent.jsonl")
+    rollup = _read_jsonl(HISTORY_DIR / f"{replica_id}.rollup.jsonl")
+    started_at = None
+    try:
+        sp = STATUS_DIR / f"{replica_id}.json"
+        if sp.exists():
+            started_at = json.loads(sp.read_text(encoding="utf-8")).get("started_at")
+    except Exception:
+        pass
+
+    if range == "live":
+        points, resolution = recent, "10s"
+    else:
+        resolution = "1m"
+        if range == "all":
+            points = rollup
+        else:
+            hours = {"1h": 1, "6h": 6}.get(range, 6)
+            cutoff = dt.datetime.now() - dt.timedelta(hours=hours)
+            def _ok(pt):
+                try:
+                    return dt.datetime.strptime(pt["t"], "%Y%m%d%H%M") >= cutoff
+                except Exception:
+                    return True
+            points = [p for p in rollup if _ok(p)]
+    return {"replica": replica_id, "range": range, "resolution": resolution,
+            "started_at": started_at, "points": points}
