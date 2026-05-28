@@ -16,9 +16,13 @@ Thumbs.db
 outputs/
 hf-cache/
 *.png
+!static/logo.png
 *.safetensors
 *.bin
 
 # 로그·임시
 *.log
 *.tmp
+
+# 윈도우 다운로드 메타데이터
+*:Zone.Identifier

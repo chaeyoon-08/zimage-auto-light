@@ -125,7 +125,7 @@ function renderGallery(){
   const el=document.getElementById('gallery');
   if(!IMAGES.length){el.innerHTML='<div style="grid-column:1/-1;text-align:center;color:var(--text-dim);padding:30px">이미지 없음</div>';return;}
   el.innerHTML=IMAGES.map((m,i)=>`<div class="thumb" onclick="openImg(${i})">
-    <img class="imgph" style="aspect-ratio:1;object-fit:cover;width:100%;display:block" loading="lazy" src="/api/images/${encodeURIComponent(m.id)}/file" alt="">
+    <div class="imgph"><img loading="lazy" src="/api/images/${encodeURIComponent(m.id)}/file" alt=""></div>
     <div class="cap"><span class="src">${(m.replica||'').slice(-5).toUpperCase()}</span><span class="mtag">${(m.png_sub||m.source||'').toUpperCase()}</span></div></div>`).join('');
 }
 
@@ -279,7 +279,7 @@ async function loadHistory(){
 }
 async function loadMini(){
   try{const imgs=await j('/api/images?replica='+encodeURIComponent(rdReplica)+'&limit=12');
-    document.getElementById('rdMini').innerHTML=imgs.length?imgs.map(m=>`<img class="imgph" style="aspect-ratio:1;object-fit:cover;width:100%;border-radius:8px" loading="lazy" src="/api/images/${encodeURIComponent(m.id)}/file">`).join(''):'<div style="color:var(--text-dim);font-size:12px;padding:10px">이미지 없음</div>';
+    document.getElementById('rdMini').innerHTML=imgs.length?imgs.map(m=>`<div class="imgph"><img loading="lazy" src="/api/images/${encodeURIComponent(m.id)}/file" alt=""></div>`).join(''):'<div style="color:var(--text-dim);font-size:12px;padding:10px">이미지 없음</div>';
   }catch(e){}
 }
 
