@@ -58,7 +58,9 @@ WORK_DIR = Path(os.getenv("WORK_DIR", "/workspace"))
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "/outputs"))   # /workspace 밖 별도 마운트
 OUTPUT_AUTO_DIR = OUTPUT_DIR / "auto"      # 자동화 생성 PNG
 OUTPUT_MANUAL_DIR = OUTPUT_DIR / "manual"  # UI 수동 테스트 생성 PNG
-RUN_ID = os.getenv("RUN_ID", "default").strip() or "default"
+_run_id_env = os.getenv("RUN_ID", "").strip()
+RUN_ID_AUTO = not _run_id_env   # 사용자가 지정 안 함 → 자동 생성
+RUN_ID = _run_id_env or ("auto-" + dt.datetime.now().strftime("%Y%m%d-%H%M"))
 CURRENT_DIR = WORK_DIR / "current" / f"run_{RUN_ID}"   # UI 렌더링용
 STATUS_DIR = CURRENT_DIR / "status"
 HISTORY_DIR = CURRENT_DIR / "history"
@@ -75,7 +77,7 @@ GEN_COUNT = os.getenv("GEN_COUNT", "").strip()
 CONDITIONS_FILE = os.getenv("CONDITIONS_FILE", "").strip()
 RANDOM_PICK = os.getenv("RANDOM_PICK", "false").strip().lower() in ("1", "true", "yes", "y")
 
-STALE_SECONDS = float(os.getenv("STALE_SECONDS", "30"))  # 이 시간 넘게 갱신 없으면 죽은 레플리카로 간주
+STALE_SECONDS = float(os.getenv("STALE_SECONDS", "60"))  # 이 시간 넘게 갱신 없으면 죽은 레플리카로 간주 (낮은 사양 GPU 배려)
 HEARTBEAT_SEC = float(os.getenv("HEARTBEAT_SEC", "3"))    # status 갱신 주기
 HISTORY_SEC = float(os.getenv("HISTORY_SEC", "10"))       # 시계열 로우데이터 샘플 주기
 RECENT_KEEP = int(os.getenv("RECENT_KEEP", "180"))        # recent 보관 점수 (10s×180=30분)
@@ -94,7 +96,7 @@ for d in (OUTPUT_DIR, OUTPUT_AUTO_DIR, OUTPUT_MANUAL_DIR, CURRENT_DIR, STATUS_DI
     d.mkdir(parents=True, exist_ok=True)
 
 print(f"[ INFO ] REPLICA(pod) = {REPLICA_ID}", flush=True)
-print(f"[ INFO ] RUN_ID = {RUN_ID}", flush=True)
+print(f"[ INFO ] RUN_ID = {RUN_ID}" + ("  (자동 생성)" if RUN_ID_AUTO else ""), flush=True)
 print(f"[ INFO ] OUTPUT_DIR(보존) = {OUTPUT_DIR}  (auto/ , manual/)", flush=True)
 print(f"[ INFO ] CURRENT_DIR(UI)  = {CURRENT_DIR}", flush=True)
 
@@ -113,6 +115,7 @@ gpu_lock = threading.Lock()
 _seq = 0
 _seq_lock = threading.Lock()
 MY_GENERATED = 0      # 이 레플리카가 만든 장 수
+TOTAL_GEN_SECONDS = 0.0  # 누적 생성 시간(초) — 가동률 계산용
 LAST_GEN = {"seconds": None, "peak_vram_mb": None, "device_used_mb": None}
 GEN_TIMES = deque(maxlen=STAT_KEEP)   # 생성 소요시간(초) 표본
 VRAM_PEAKS = deque(maxlen=STAT_KEEP)  # 생성 VRAM peak(GB) 표본
@@ -156,13 +159,14 @@ def _next_seq():
 
 def _run_generation(prompt, width, height, steps, guidance, seed, source, config_file=None):
     """1장 생성 → PNG는 OUTPUT_DIR(보존), 메타는 CURRENT_DIR(UI). gpu_lock 안에서 호출."""
-    global MY_GENERATED
+    global MY_GENERATED, TOTAL_GEN_SECONDS
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
     generator = torch.Generator().manual_seed(int(seed))
 
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
+    start_dt = dt.datetime.now()
     t0 = time.time()
 
     image: Image.Image = pipe(
@@ -171,6 +175,7 @@ def _run_generation(prompt, width, height, steps, guidance, seed, source, config
     ).images[0]
 
     elapsed = round(time.time() - t0, 2)
+    finish_dt = dt.datetime.now()
     peak_gb = None
     if torch.cuda.is_available():
         peak_gb = round(torch.cuda.max_memory_allocated() / 1024**3, 2)
@@ -179,6 +184,7 @@ def _run_generation(prompt, width, height, steps, guidance, seed, source, config
         free_b, total_b = torch.cuda.mem_get_info()
         LAST_GEN["device_used_mb"] = round((total_b - free_b) / 1024**2, 1)
     GEN_TIMES.append(elapsed)
+    TOTAL_GEN_SECONDS += elapsed
     if peak_gb is not None:
         VRAM_PEAKS.append(peak_gb)
 
@@ -208,7 +214,10 @@ def _run_generation(prompt, width, height, steps, guidance, seed, source, config
         "source": source,               # auto | manual
         "config_file": config_file,     # AUTO일 때 사용한 conditions 파일명 (MANUAL이면 None)
         "run_id": RUN_ID,
-        "created": dt.datetime.now().isoformat(timespec="seconds"),
+        "started": start_dt.isoformat(timespec="seconds"),    # 생성 시작
+        "finished": finish_dt.isoformat(timespec="seconds"),  # 생성 종료
+        "elapsed_s": elapsed,                                  # 걸린 시간(초)
+        "created": finish_dt.isoformat(timespec="seconds"),   # (하위호환) = finished
     }
     try:
         (CURRENT_DIR / f"{stem}.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
@@ -229,6 +238,8 @@ class JobManager:
         self.completed = 0
         self.message = ""
         self.config_file = None
+        self.job_started = None    # 현재(또는 마지막) 작업 시작 시각
+        self.job_finished = None   # 작업 종료 시각
         self._cancel = threading.Event()
         self._resume = threading.Event()
         self._thread = None
@@ -245,6 +256,7 @@ class JobManager:
             raise HTTPException(400, "조건 목록이 비어 있습니다.")
         self.state = "running"; self.total = int(count); self.completed = 0
         self.message = ""; self.config_file = config_file
+        self.job_started = dt.datetime.now(); self.job_finished = None
         self._cancel.clear(); self._resume.set()
         self._thread = threading.Thread(target=self._worker,
                                         args=(conditions, int(count), bool(random_pick), config_file),
@@ -260,10 +272,10 @@ class JobManager:
         try:
             for i in range(count):
                 if self._cancel.is_set():
-                    self.state = "cancelled"; self.message = f"{self.completed}장 후 취소"; return
+                    self.state = "cancelled"; self.message = f"{self.completed}장 후 취소"; self.job_finished = dt.datetime.now(); return
                 self._resume.wait()
                 if self._cancel.is_set():
-                    self.state = "cancelled"; self.message = f"{self.completed}장 후 취소"; return
+                    self.state = "cancelled"; self.message = f"{self.completed}장 후 취소"; self.job_finished = dt.datetime.now(); return
                 c = self._pick(conds, i, rnd)
                 with gpu_lock:
                     _run_generation(c.get("prompt", ""), int(c.get("width", DEFAULT_WIDTH)),
@@ -271,9 +283,9 @@ class JobManager:
                                     float(c.get("guidance", DEFAULT_GUIDANCE)), c.get("seed"),
                                     src, config_file)
                 self.completed += 1
-            self.state = "done"; self.message = f"{self.completed}장 완료"
+            self.state = "done"; self.message = f"{self.completed}장 완료"; self.job_finished = dt.datetime.now()
         except Exception as e:
-            self.state = "error"; self.message = str(e)
+            self.state = "error"; self.message = str(e); self.job_finished = dt.datetime.now()
 
     def pause(self):
         if self.state == "running":
@@ -314,11 +326,23 @@ def _status_payload():
     avg_s, min_s, max_s = _stat(GEN_TIMES)
     vram_avg, _vmin, vram_peak = _stat(VRAM_PEAKS)
     now = dt.datetime.now()
+    uptime_s = max(1, int((now - STARTED_AT).total_seconds()))
+    busy_ratio = round(min(100.0, TOTAL_GEN_SECONDS / uptime_s * 100), 1)   # 가동률 = 누적 생성시간/가동시간
+    throughput_hr = round(MY_GENERATED / (uptime_s / 3600.0), 1) if MY_GENERATED else 0.0  # 시간당 실제 생성량
+    throughput_max_hr = round(3600.0 / avg_s, 1) if avg_s else None          # 현재 속도 기준 이론 최대/시간
+    vram_eff = vram_avg                                                       # 장당 평균 VRAM peak(효율)
     return {
         "replica": REPLICA_ID,
         "updated": now.isoformat(timespec="seconds"),
         "started_at": STARTED_AT.isoformat(timespec="seconds"),
-        "uptime_s": int((now - STARTED_AT).total_seconds()),
+        "uptime_s": uptime_s,
+        "job_started": job.job_started.isoformat(timespec="seconds") if job.job_started else None,
+        "job_finished": job.job_finished.isoformat(timespec="seconds") if job.job_finished else None,
+        "busy_ratio": busy_ratio,
+        "gen_seconds_total": round(TOTAL_GEN_SECONDS, 1),   # 누적 생성시간(가동률 분자)
+        "throughput_hr": throughput_hr,
+        "throughput_max_hr": throughput_max_hr,
+        "vram_eff_gb": vram_eff,
         "vram_used_gb": snap["vram_used_gb"],
         "vram_total_gb": snap["vram_total_gb"],
         "vram_peak_gb": vram_peak,           # 생성 VRAM peak (빨강 판단 기준)
@@ -545,7 +569,7 @@ def model_info():
     base = repo.split("/")[-1].split("-SDNQ")[0]
     low = repo.lower()
     dtype = next((d for d in ("uint4", "int8", "int4", "uint8", "fp8") if d in low), "?")
-    return {"repo": repo, "name": base, "dtype": dtype, "run_id": RUN_ID}
+    return {"repo": repo, "name": base, "dtype": dtype, "run_id": RUN_ID, "run_auto": RUN_ID_AUTO}
 
 
 @app.get("/api/replicas")
@@ -569,6 +593,7 @@ def list_replicas_all():
 def _replicas(include_stale=False):
     now = dt.datetime.now()
     reps = []
+    dead_count = 0
     try:
         for p in STATUS_DIR.glob("*.json"):
             try:
@@ -587,8 +612,10 @@ def _replicas(include_stale=False):
                 pass
             r["_age_s"] = round(age, 1) if age is not None else None
             r["_stale"] = (age is not None and age > STALE_SECONDS)
-            if r["_stale"] and not include_stale:
-                continue
+            if r["_stale"]:
+                dead_count += 1          # 죽음은 포함 여부와 무관하게 항상 카운트
+                if not include_stale:
+                    continue
             reps.append(r)
     except Exception:
         pass
@@ -596,37 +623,56 @@ def _replicas(include_stale=False):
     alive = [r for r in reps if not r.get("_stale")]
     total_gen = sum(r.get("generated", 0) or 0 for r in alive)
     running = [r for r in alive if r.get("job_state") == "running"]
+    paused = [r for r in alive if r.get("job_state") == "paused"]
+    done = [r for r in alive if r.get("job_state") in ("done", "idle", "cancelled", "error")]
     utils = [r.get("util") for r in alive if r.get("util") is not None]
     summary = {
         "replicas": len(alive),
         "total_generated": total_gen,
         "running": len(running),
         "avg_util": round(sum(utils) / len(utils)) if utils else None,
+        "states": {"running": len(running), "paused": len(paused),
+                   "done": len(done), "dead": dead_count},
     }
     return {"run_id": RUN_ID, "summary": summary, "replicas": reps, "stale_seconds": STALE_SECONDS}
 
 
 @app.get("/api/images")
-def list_images(replica: str = None, source: str = None, limit: int = 500):
-    """CURRENT_DIR의 메타 json 스캔 → 이번 실행 이미지 목록 (최근순).
+def list_images(replica: str = None, source: str = None, scope: str = "run", limit: int = 1000):
+    """메타 json 스캔 → 이미지 목록(최근순).
+    scope='run'(기본): 이번 실행(CURRENT_DIR)만. scope='all': 저장소의 모든 실행(run_* 전체 폴더) 집계.
     replica 필터(파드 이름), source 필터(auto|manual) 옵션."""
-    metas = []
-    try:
-        files = sorted(CURRENT_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-        for p in files:
-            if len(metas) >= limit:
-                break
-            try:
-                m = json.loads(p.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if replica and m.get("replica") != replica:
-                continue
-            if source and (m.get("png_sub") or m.get("source")) != source:
-                continue
-            metas.append(m)
-    except Exception:
-        pass
+    if scope == "all":
+        runs_root = CURRENT_DIR.parent   # /workspace/current
+        dirs = sorted((d for d in runs_root.glob("run_*") if d.is_dir())) if runs_root.exists() else []
+    else:
+        dirs = [CURRENT_DIR]
+    seen = {}   # id -> (mtime, meta)  : 같은 id면 최신 것만 (실행 간 중복 방지)
+    for d in dirs:
+        try:
+            for p in d.glob("*.json"):
+                try:
+                    mt = p.stat().st_mtime
+                    m = json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                iid = m.get("id") or p.stem
+                if iid in seen and seen[iid][0] >= mt:
+                    continue
+                m["_mtime"] = mt
+                seen[iid] = (mt, m)
+        except Exception:
+            continue
+    metas = [v[1] for v in seen.values()]
+    if replica:
+        metas = [m for m in metas if m.get("replica") == replica]
+    if source:
+        metas = [m for m in metas if (m.get("png_sub") or m.get("source")) == source]
+    metas.sort(key=lambda m: m.get("_mtime", 0), reverse=True)
+    if limit and len(metas) > limit:
+        metas = metas[:limit]
+    for m in metas:
+        m.pop("_mtime", None)
     return metas
 
 
