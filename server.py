@@ -58,14 +58,21 @@ WORK_DIR = Path(os.getenv("WORK_DIR", "/workspace"))
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "/outputs"))   # /workspace 밖 별도 마운트
 OUTPUT_AUTO_DIR = OUTPUT_DIR / "auto"      # 자동화 생성 PNG
 OUTPUT_MANUAL_DIR = OUTPUT_DIR / "manual"  # UI 수동 테스트 생성 PNG
+REPLICA_ID = socket.gethostname()   # 파드 이름 (예: dep2520-75f955bf6f-5phj7)
 _run_id_env = os.getenv("RUN_ID", "").strip()
 RUN_ID_AUTO = not _run_id_env   # 사용자가 지정 안 함 → 자동 생성
-RUN_ID = _run_id_env or ("auto-" + dt.datetime.now().strftime("%Y%m%d-%H%M"))
-CURRENT_DIR = WORK_DIR / "current" / f"run_{RUN_ID}"   # UI 렌더링용
+if _run_id_env:
+    RUN_ID = _run_id_env
+else:
+    # RUN_ID 미지정 시: 같은 배포(ReplicaSet)의 파드끼리 같은 run을 써야 서로의 상태/이미지가 보인다.
+    # 파드 이름 <배포>-<RS해시>-<파드해시> 에서 마지막 파드해시만 떼면 같은 배포의 파드끼리 동일.
+    # 예: dep2520-75f955bf6f-5phj7 → auto-dep2520-75f955bf6f
+    _parts = REPLICA_ID.rsplit("-", 1)
+    _base = _parts[0] if (len(_parts) == 2 and _parts[1]) else REPLICA_ID
+    RUN_ID = "auto-" + _base
+CURRENT_DIR = WORK_DIR / "current" / f"run_{RUN_ID}"   # UI 렌더링용 (실행 격리 키)
 STATUS_DIR = CURRENT_DIR / "status"
 HISTORY_DIR = CURRENT_DIR / "history"
-
-REPLICA_ID = socket.gethostname()   # 파드 이름
 STARTED_AT = dt.datetime.now()      # 레플리카 시작 시각 (uptime용)
 
 DEFAULT_WIDTH = int(os.getenv("ZIMG_WIDTH", "1024"))

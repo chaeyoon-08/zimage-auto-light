@@ -17,11 +17,21 @@ function show(v){TAB=v;
   document.getElementById('vGen').hidden=v!=='gen';
   document.getElementById('vDash').hidden=v!=='dash';
   document.getElementById('vImg').hidden=v!=='img';
+  document.getElementById('vDocs').hidden=v!=='docs';
   document.getElementById('tGen').classList.toggle('on',v==='gen');
   document.getElementById('tDash').classList.toggle('on',v==='dash');
   document.getElementById('tImg').classList.toggle('on',v==='img');
+  document.getElementById('tDocs').classList.toggle('on',v==='docs');
   if(v==='dash')reloadReplicas();
-  if(v==='img')loadImgTab();}
+  if(v==='img')loadImgTab();
+  if(v==='docs'){if(!document.querySelector('#docsBody .d-sec.on'))showDoc('intro');}}
+// 사용법: 왼쪽 목차(리모콘) 클릭 → 해당 섹션으로 스크롤 / 스크롤 시 현재 섹션 목차 강조
+function showDoc(id,btn){
+  document.querySelectorAll('#docsBody .d-sec').forEach(s=>s.classList.toggle('on', s.id==='docsec-'+id));
+  const btns=[...document.querySelectorAll('.d-toc button')];
+  btns.forEach(b=>b.classList.remove('on'));
+  (btn||btns.find(b=>b.dataset.t===id)||btns[0]).classList.add('on');
+  const sc=document.getElementById('docsBody'); if(sc) sc.scrollTop=0;}
 
 // ───────── MANUAL 접기 (접으면 REPLICAS가 flex로 늘어남) ─────────
 function toggleManual(){const b=document.getElementById('manualBody'),t=document.getElementById('manualToggle');
@@ -154,17 +164,17 @@ function renderResources(){
   const vover=lim&&g.vram_used_gb!=null&&g.vram_used_gb>lim;
   const vp=g.vram_total_gb?Math.min(100,g.vram_used_gb/g.vram_total_gb*100):0;
   const rp=g.ram_total_gb?Math.min(100,g.ram_used_gb/g.ram_total_gb*100):0;
-  document.getElementById('resGrid').innerHTML=`
+  setHTML(document.getElementById('resGrid'),`
     <div class="res ${vover?'over':''}"><div class="rk">GPU VRAM</div><div class="rv">${g.vram_used_gb??'–'} <small>/ ${g.vram_total_gb??'–'} GB</small></div><div class="rbar"><i style="width:${vp}%"></i></div></div>
     <div class="res"><div class="rk">System RAM</div><div class="rv">${g.ram_used_gb??'–'} <small>/ ${g.ram_total_gb??'–'} GB</small></div><div class="rbar"><i style="width:${rp}%"></i></div></div>
     <div class="res"><div class="rk">GPU Util</div><div class="rv">${g.util??'–'} <small>%</small></div></div>
-    <div class="res"><div class="rk">VRAM peak</div><div class="rv">${RES.vram_peak_gb??'–'} <small>GB</small></div></div>`;
+    <div class="res"><div class="rk">VRAM peak</div><div class="rv">${RES.vram_peak_gb??'–'} <small>GB</small></div></div>`);
   const f=v=>v==null?'–':v;
-  document.getElementById('speedGrid').innerHTML=`
+  setHTML(document.getElementById('speedGrid'),`
     <div class="sp"><div class="k">최근 생성</div><div class="v">${f(RES.last_gen?.seconds)}<small>s</small></div></div>
     <div class="sp"><div class="k">평균</div><div class="v">${f(RES.gen_avg_s)}<small>s</small></div></div>
     <div class="sp"><div class="k">최단</div><div class="v">${f(RES.gen_min_s)}<small>s</small></div></div>
-    <div class="sp"><div class="k">최장</div><div class="v">${f(RES.gen_max_s)}<small>s</small></div></div>`;
+    <div class="sp"><div class="k">최장</div><div class="v">${f(RES.gen_max_s)}<small>s</small></div></div>`);
 }
 // 상태 → 점 색깔 (#4): 죽음 빨강 / 작업중 초록(기본) / 멈춤 노랑 / 끝남·기타 회색
 function dotClass(r){
@@ -187,6 +197,8 @@ function reconcile(container, items, keyOf, clsOf, htmlOf, onClickOf){
   });
   [...container.children].forEach(c=>{ if(c.dataset.key!==undefined && !keys.has(c.dataset.key)) c.remove(); });
 }
+// 폴링 패널용: 내용(html)이 실제로 바뀐 경우에만 갱신 → 매 사이클 통째 재생성/깜빡임 방지
+function setHTML(el, html){ if(el && el.__html!==html){ el.innerHTML=html; el.__html=html; } }
 function renderReplist(){
   const q=(document.getElementById('rq').value||'').toLowerCase();
   const list=REPS.filter(r=>(r.replica||'').toLowerCase().includes(q));
@@ -220,18 +232,32 @@ function renderGallery(){
   if(recentMode){ // 방금 생성 모드: MANUAL을 최신순으로 (recentIds는 NEW 배지로 강조)
     list=[...IMAGES].sort((a,b)=>String(b.finished||b.created||'').localeCompare(String(a.finished||a.created||'')));
   }
-  if(!list.length){el.innerHTML='<div style="grid-column:1/-1;text-align:center;color:var(--text-dim);padding:30px">이미지 없음</div>';el.__sig=null;return;}
-  const sig=list.map(m=>m.id).join('|')+'#'+galFilter+'#'+(selRep||'')+'#'+recentMode+'#'+recentIds.join(',');
-  if(el.__sig===sig) return;   // 목록·필터 그대로면 재구축 안 함
-  el.__sig=sig;
-  el.innerHTML=list.map((m,i)=>{
-    const isNew=recentMode&&recentIds.includes(m.id);
-    return `<div class="thumb" onclick="openImg(${i})">
-      ${isNew?'<span class="new-badge">NEW</span>':''}
-      <div class="imgph" data-src="/api/images/${encodeURIComponent(m.id)}/file"></div>
-      <div class="cap"><span class="src">${(m.replica||'').slice(-5).toUpperCase()}</span><span class="mtag">${(m.png_sub||m.source||'').toUpperCase()}</span></div></div>`;
-  }).join('');
-  el.querySelectorAll('.imgph').forEach(b=>loadImgBox(b));
+  if(!list.length){el.innerHTML='<div style="grid-column:1/-1;text-align:center;color:var(--text-dim);padding:30px">이미지 없음</div>';return;}
+  reconcileThumbs(el, list, m=>recentMode&&recentIds.includes(m.id));
+}
+// 썸네일 keyed reconcile: 이미 떠 있는 이미지는 그대로 두고(재로드 X), 새 것만 추가·사라진 것만 제거.
+// 폴링마다 전체를 다시 그리지 않아 깜빡임 없음. 클릭은 메타 객체를 클로저로 잡아 재정렬에도 안전.
+function reconcileThumbs(el, list, isNewFn){
+  [...el.children].forEach(n=>{ if(!(n.dataset&&n.dataset.id)) n.remove(); });  // placeholder 등 제거
+  const existing={}; [...el.children].forEach(n=>{ existing[n.dataset.id]=n; });
+  list.forEach((m,idx)=>{
+    let node=existing[m.id];
+    if(node){
+      delete existing[m.id];
+      const nb=node.querySelector('.new-badge'); const want=!!(isNewFn&&isNewFn(m));
+      if(want&&!nb){const s=document.createElement('span');s.className='new-badge';s.textContent='NEW';node.insertBefore(s,node.firstChild);}
+      else if(!want&&nb)nb.remove();
+    }else{
+      node=document.createElement('div'); node.className='thumb'; node.dataset.id=m.id;
+      node.onclick=()=>openImgObj(m);
+      const isNew=!!(isNewFn&&isNewFn(m));
+      node.innerHTML=`${isNew?'<span class="new-badge">NEW</span>':''}<div class="imgph" data-src="/api/images/${encodeURIComponent(m.id)}/file"></div><div class="cap"><span class="src">${(m.replica||'').slice(-5).toUpperCase()}</span><span class="mtag">${(m.png_sub||m.source||'').toUpperCase()}</span></div>`;
+      loadImgBox(node.querySelector('.imgph'));   // 새로 만든 박스만 로드
+    }
+    const cur=el.children[idx];
+    if(cur!==node) el.insertBefore(node, cur||null);   // 순서 맞추기 (이동은 재로드 아님)
+  });
+  Object.values(existing).forEach(n=>n.remove());   // 사라진 것 제거
 }
 
 // ───────── 이미지 로더 (불러오는 중 → 시간 더 걸림 → 다시 불러오기) ─────────
@@ -350,10 +376,7 @@ function renderImgTab(){
   document.getElementById('imgCount').textContent=`${list.length} / ${IMGTAB.length} 장`;
   const el=document.getElementById('imgGrid');
   if(!list.length){el.innerHTML='<div style="grid-column:1/-1;text-align:center;color:var(--text-dim);padding:40px">이미지 없음</div>';return;}
-  el.innerHTML=list.map((m,i)=>`<div class="thumb" onclick="openImgObj(imgGridList[${i}])">
-    <div class="imgph" data-src="/api/images/${encodeURIComponent(m.id)}/file"></div>
-    <div class="cap"><span class="src">${(m.replica||'').slice(-5).toUpperCase()}</span><span class="mtag">${(m.png_sub||m.source||'').toUpperCase()}</span></div></div>`).join('');
-  el.querySelectorAll('.imgph').forEach(b=>loadImgBox(b));
+  reconcileThumbs(el, list, null);
 }
 // 레플리카 모달 "더보기" → 이미지 탭으로 (그 레플리카로 세부 조건 필터)
 function goImageTab(replica){
@@ -414,7 +437,7 @@ function renderSummary(s){if(!s)return;
   const ic=id=>`<svg class="ico sum-ico"><use href="#${id}"/></svg>`;
   // 상태 분포 (running/paused/done/dead) — 아이콘+개수 칩
   const stateCell=(cls,icon,n)=>`<span class="st-pill ${cls}"><svg class="ico"><use href="#${icon}"/></svg>${n}</span>`;
-  document.getElementById('summary').innerHTML=`
+  setHTML(document.getElementById('summary'),`
     <div class="sum"><div class="k">${ic('i-layers')}레플리카</div><div class="v">${s.replicas} <small>개</small></div></div>
     <div class="sum"><div class="k">${ic('i-image')}총 생성 이미지</div><div class="v">${s.total_generated}</div></div>
     <div class="sum sum-wide"><div class="k">${ic('i-activity')}상태</div>
@@ -426,7 +449,7 @@ function renderSummary(s){if(!s)return;
       </div></div>
     <div class="sum"><div class="k">${ic('i-zap')}전체 시간당 생성</div><div class="v">${totTp} <small>장/h</small></div></div>
     <div class="sum"><div class="k">${ic('i-gauge')}평균 가동률</div><div class="v">${avgBusy??'–'} <small>%</small></div></div>
-    <div class="sum"><div class="k">${ic('i-cpu')}평균 GPU Util</div><div class="v">${s.avg_util??'–'} <small>%</small></div></div>`;
+    <div class="sum"><div class="k">${ic('i-cpu')}평균 GPU Util</div><div class="v">${s.avg_util??'–'} <small>%</small></div></div>`);
 }
 function condBadgeCount(){let n=0;if(cond.status!=='all')n++;if(cond.sort!=='name')n++;
   if(document.getElementById('cOver').checked)n++;if(document.getElementById('cStale').checked)n++;return n;}
@@ -494,29 +517,29 @@ function paintReplica(r){
   document.getElementById('rdAge').textContent=ai.txt;
   document.getElementById('rdLive').className='live '+ai.cls;
   const vt=r.vram_total_gb||32, rt=r.ram_total_gb||64;
-  document.getElementById('gauges').innerHTML=
+  setHTML(document.getElementById('gauges'),
     gauge('GPU VRAM',r.vram_used_gb||0,vt,'/ '+vt+' GB', limitDashVal()&&r.vram_used_gb>limitDashVal())+
     gauge('System RAM',r.ram_used_gb||0,rt,'/ '+rt+' GB',false)+
-    gauge('GPU Util',r.util||0,100,'%',false);
-  document.getElementById('rdProgNum').innerHTML=`${r.job_completed||0} <span style="color:var(--text-dim);font-size:15px">/ ${r.job_total||0}</span>`;
+    gauge('GPU Util',r.util||0,100,'%',false));
+  setHTML(document.getElementById('rdProgNum'),`${r.job_completed||0} <span style="color:var(--text-dim);font-size:15px">/ ${r.job_total||0}</span>`);
   const pct=r.job_total?Math.round(r.job_completed/r.job_total*100):0;
   document.getElementById('rdProgPct').textContent=pct+'%';
   document.getElementById('rdProgBar').style.width=pct+'%';
   const f=v=>v==null?'–':v;
   const r1=v=>v==null?'–':(Math.round(v*10)/10);   // 소수 첫째자리 반올림
-  document.getElementById('rdProgStats').innerHTML=`
+  setHTML(document.getElementById('rdProgStats'),`
     <div class="ps"><div class="k">평균 생성</div><div class="v">${r1(r.avg_gen_s)}<small>s</small></div></div>
     <div class="ps"><div class="k">최단</div><div class="v">${r1(r.min_gen_s)}<small>s</small></div></div>
     <div class="ps"><div class="k">최장</div><div class="v">${r1(r.max_gen_s)}<small>s</small></div></div>
     <div class="ps"><div class="k">VRAM 평균</div><div class="v">${r1(r.vram_avg_gb)}<small>GB</small></div></div>
-    <div class="ps"><div class="k">VRAM peak</div><div class="v">${r1(r.vram_peak_gb)}<small>GB</small></div></div>`;
+    <div class="ps"><div class="k">VRAM peak</div><div class="v">${r1(r.vram_peak_gb)}<small>GB</small></div></div>`);
   // 작업 시간 — 시작 ●━[걸린시간]━● 종료 타임라인 하나
   const fdt=t=>t?String(t).replace('T',' '):null;
   const running=!r.job_finished;
   let durTxt='–';
   if(r.job_started){ const end=r.job_finished?new Date(r.job_finished):new Date();
     durTxt=fmtDur(Math.max(0,Math.round((end-new Date(r.job_started))/1000))); }
-  document.getElementById('rdJobTime').innerHTML = !r.job_started ? '<div class="jt-empty">작업 기록 없음</div>' : `
+  setHTML(document.getElementById('rdJobTime'), !r.job_started ? '<div class="jt-empty">작업 기록 없음</div>' : `
     <div class="jt-rail">
       <span class="jt-dot start"></span>
       <span class="jt-line"><span class="jt-dur">${durTxt}</span></span>
@@ -525,18 +548,18 @@ function paintReplica(r){
     <div class="jt-ends">
       <span class="jt-t">시작 ${fdt(r.job_started)}</span>
       <span class="jt-t">${running?'진행 중':'종료 '+fdt(r.job_finished)}</span>
-    </div>`;
+    </div>`);
   // 성능 분석 — 값 + 계산 근거 병기
   const upMin=r.uptime_s?Math.round(r.uptime_s/60*10)/10:null;     // 가동시간(분)
   const genMin=r.gen_seconds_total!=null?Math.round(r.gen_seconds_total/60*10)/10:null; // 생성에 쓴 시간(분)
   const perf=(k,val,unit,basis)=>`<div class="pl-row"><div class="pl-k">${k}</div>
     <div class="pl-v">${val}<small>${unit}</small></div><div class="pl-basis">${basis}</div></div>`;
-  document.getElementById('rdPerf').innerHTML=
+  setHTML(document.getElementById('rdPerf'),
     perf('시간당 생성', f(r.throughput_hr), '장/h', (r.generated!=null&&upMin!=null)?`${r.generated}장 ÷ ${upMin}분 × 60`:'데이터 부족')+
     perf('장당 평균', r1(r.avg_gen_s), 's', '최근 생성 표본 평균')+
     perf('가동률', f(r.busy_ratio), '%', (genMin!=null&&upMin!=null)?`생성 ${genMin}분 ÷ 가동 ${upMin}분`:'데이터 부족')+
     perf('이론 최대', f(r.throughput_max_hr), '장/h', r.avg_gen_s?`3600초 ÷ 장당 ${r1(r.avg_gen_s)}s`:'데이터 부족')+
-    perf('VRAM 효율', r1(r.vram_eff_gb), 'GB/장', '장당 평균 VRAM peak');
+    perf('VRAM 효율', r1(r.vram_eff_gb), 'GB/장', '장당 평균 VRAM peak'));
   document.getElementById('rdMore').onclick=()=>goImageTab(r.replica);
 }
 function fmtDur(s){ if(s<60)return s+'초'; const m=Math.floor(s/60),ss=s%60; if(m<60)return m+'분 '+ss+'초'; const h=Math.floor(m/60); return h+'시간 '+(m%60)+'분'; }
@@ -562,7 +585,7 @@ function closeRd(){document.getElementById('rdModal').classList.remove('on');if(
 function setRange(r,btn){rdRange=r;[...document.getElementById('tsToolbar').children].forEach(b=>b.classList.remove('on'));btn.classList.add('on');loadHistory();}
 async function loadHistory(){
   try{const d=await j('/api/replica/'+encodeURIComponent(rdReplica)+'/history?range='+rdRange);
-    document.getElementById('tsChart').innerHTML=sparkline(d.points||[]);}catch(e){document.getElementById('tsChart').innerHTML='<div style="color:var(--text-dim);font-size:12px;text-align:center;padding:20px">데이터 없음</div>';}
+    setHTML(document.getElementById('tsChart'),sparkline(d.points||[]));}catch(e){setHTML(document.getElementById('tsChart'),'<div style="color:var(--text-dim);font-size:12px;text-align:center;padding:20px">데이터 없음</div>');}
 }
 async function loadMini(){
   try{const imgs=await j('/api/images?replica='+encodeURIComponent(rdReplica)+'&limit=6');
