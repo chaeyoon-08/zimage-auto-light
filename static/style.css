@@ -93,8 +93,9 @@ input.invalid,textarea.invalid,select.invalid{border-color:var(--danger-soft);ba
 .bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--purple-deep),var(--purple));transition:width .3s;}
 .ctrl{display:flex;gap:8px;margin-top:12px;}
 .ctrl button{flex:1;padding:9px;border:1px solid var(--line);background:rgba(255,255,255,.05);color:var(--text-2);border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
-.ctrl button:hover{border-color:var(--purple);color:#fff;}
-.ctrl button.danger:hover{border-color:var(--danger);color:#ff9b9b;}
+.ctrl button:not(:disabled):hover{border-color:var(--purple);color:#fff;}
+.ctrl button.danger:not(:disabled):hover{border-color:var(--danger);color:#ff9b9b;}
+.ctrl button:disabled{opacity:.4;cursor:default;}
 
 /* REPLICAS */
 .repsel{display:flex;flex-direction:column;min-height:0;flex:1;}

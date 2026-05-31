@@ -100,9 +100,9 @@
         <div class="status-row"><span id="jc">–</span><span class="state-chip s-idle" id="jstate">IDLE</span></div>
         <div class="bar"><i id="jbar" style="width:0%"></i></div>
         <div class="ctrl">
-          <button title="일시중지" onclick="jobCtrl('pause')"><svg class="ico"><use href="#i-pause"/></svg></button>
-          <button title="재개" onclick="jobCtrl('resume')"><svg class="ico"><use href="#i-play"/></svg></button>
-          <button class="danger" title="취소" onclick="jobCtrl('cancel')"><svg class="ico"><use href="#i-x"/></svg></button>
+          <button id="btnPause" title="일시중지" onclick="jobCtrl('pause')"><svg class="ico"><use href="#i-pause"/></svg></button>
+          <button id="btnResume" title="재개" onclick="jobCtrl('resume')"><svg class="ico"><use href="#i-play"/></svg></button>
+          <button id="btnCancel" class="danger" title="취소" onclick="jobCtrl('cancel')"><svg class="ico"><use href="#i-x"/></svg></button>
         </div>
       </div>
 

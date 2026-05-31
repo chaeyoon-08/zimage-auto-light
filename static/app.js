@@ -156,6 +156,11 @@ function renderJob(s){
   document.getElementById('jstate').className='state-chip '+(cls[s.state]||'s-idle');
   document.getElementById('jc').textContent=s.total?`${s.completed} / ${s.total}`:'–';
   document.getElementById('jbar').style.width=(s.total?Math.round(s.completed/s.total*100):0)+'%';
+  // 제어 버튼 활성/비활성: running=일시중지만 / paused=재개·취소만 / 그 외 전부 잠금
+  const jRunning=s.state==='running', jPaused=s.state==='paused';
+  document.getElementById('btnPause').disabled=!jRunning;
+  document.getElementById('btnResume').disabled=!jPaused;
+  document.getElementById('btnCancel').disabled=!jPaused;
   // 다량·CONFIG 생성(job) 완료 감지 → 결과 버튼 활성
   if(genWatching && ['done','idle','cancelled','error'].includes(s.state)){ genWatching=false; finishGenerate(); }
 }
