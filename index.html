@@ -100,14 +100,14 @@
         <div class="status-row"><span id="jc">–</span><span class="state-chip s-idle" id="jstate">IDLE</span></div>
         <div class="bar"><i id="jbar" style="width:0%"></i></div>
         <div class="ctrl">
-          <button id="btnPause" title="일시중지" onclick="jobCtrl('pause')"><svg class="ico"><use href="#i-pause"/></svg></button>
-          <button id="btnResume" title="재개" onclick="jobCtrl('resume')"><svg class="ico"><use href="#i-play"/></svg></button>
-          <button id="btnCancel" class="danger" title="취소" onclick="jobCtrl('cancel')"><svg class="ico"><use href="#i-x"/></svg></button>
+          <button id="btnPause" title="일시중지" onclick="openControlModal('pause')"><svg class="ico"><use href="#i-pause"/></svg></button>
+          <button id="btnResume" title="재개" onclick="openControlModal('resume')"><svg class="ico"><use href="#i-play"/></svg></button>
+          <button id="btnCancel" class="danger" title="취소" onclick="openControlModal('cancel')"><svg class="ico"><use href="#i-x"/></svg></button>
         </div>
       </div>
 
       <div class="panel repsel">
-        <div class="ph"><h2>Replicas</h2><label class="cond-chk ph-chk"><input type="checkbox" id="rStale" onchange="poll()"><span class="switch"></span> 죽은 것 포함</label></div>
+        <div class="ph"><h2>Replicas</h2><label class="cond-chk ph-chk"><input type="checkbox" id="rStale" onchange="renderReplist()" checked><span class="switch"></span> 죽은 것 포함</label></div>
         <div class="srow">
           <div class="search"><svg class="ico"><use href="#i-search"/></svg><input id="rq" placeholder="레플리카 ID 검색..." oninput="renderReplist()"></div>
           <button class="all-btn on" id="repAll" onclick="selReplica(null)">All</button>
@@ -151,7 +151,7 @@
           <div class="cond-group"><div class="cond-label">정렬</div><div class="cond-seg" id="segSort">
             <button class="on" data-v="name">이름순 <span class="def">기본</span></button><button data-v="gen">생성 많은순</button><button data-v="vram">VRAM 높은순</button><button data-v="util">Util 높은순</button></div></div>
           <label class="cond-chk"><input type="checkbox" id="cOver" onchange="renderCards()"><span class="switch"></span> VRAM limit 초과만</label>
-          <label class="cond-chk"><input type="checkbox" id="cStale" onchange="reloadReplicas()"><span class="switch"></span> 죽은 레플리카 포함</label>
+          <label class="cond-chk"><input type="checkbox" id="cStale" onchange="renderCards()" checked><span class="switch"></span> 죽은 레플리카 포함</label>
         </div></div>
       <div class="limit-box limit-pill"><span>VRAM limit</span><input type="number" placeholder="–" id="limitDash" oninput="renderCards()"><span>GB</span></div>
     </div>
@@ -425,6 +425,11 @@
               </ul>
             </div>
           </div>
+          <div class="d-note">
+            <div class="d-n"><div class="t"><span class="d-dot" style="background:#B47AFF"></span>레플리카 수 색 구분</div><div class="x">맨 위 '레플리카' 숫자는 <b style="color:#B47AFF">보라 = 살아있음</b> · <b>흰색 = 죽음</b>으로 나뉘어 표시됩니다.</div></div>
+            <div class="d-n"><div class="t"><span class="d-dot" style="background:#B47AFF"></span>보라색 LOADING</div><div class="x">모델을 불러오는 중이라는 뜻입니다. 저사양·노하드(디스크리스) 노드에선 더 오래 걸릴 수 있고, 끝나면 자동으로 RUNNING으로 바뀝니다.</div></div>
+            <div class="d-n"><div class="t"><span class="d-dot" style="background:#ffd479"></span>화면은 실시간이 아닙니다</div><div class="x">네트워크 안정성을 위해 정보를 약간 지연해서 보여줍니다(보통 수 초). 차이는 크지 않지만, 방금 한 조작(생성·일시중지·취소)이 화면에 바로 안 보일 수 있으니 잠깐 기다려 주세요.</div></div>
+          </div>
           <div class="d-sub-h">레플리카 상세 모달 (카드 클릭)</div>
           <div class="d-row">
             <div class="d-mock">
@@ -686,7 +691,7 @@
       <span class="live" id="rdLive"><span class="dot" id="rdDot"></span> <span id="rdAge"></span></span>
     </div>
     <div class="rd-section">
-      <h3>현재 자원</h3>
+      <h3>현재 자원 <span class="gpu-badge" id="rdGpu"></span></h3>
       <div class="gauges" id="gauges"></div>
     </div>
     <div class="rd-section">
@@ -704,6 +709,7 @@
           <div class="prog-head"><span class="prog-num" id="rdProgNum">–</span><span class="prog-pct" id="rdProgPct">–</span></div>
           <div class="prog-bar"><i id="rdProgBar" style="width:0%"></i></div>
         </div>
+        <div class="rd-reason" id="rdReason"></div>
         <div class="prog-stats" id="rdProgStats"></div>
       </div>
     </div>
@@ -720,6 +726,20 @@
     <div class="rd-section">
       <h3>이 레플리카 이미지 <button class="more-btn" id="rdMore">더보기 ›</button></h3>
       <div class="rd-mini rd-mini-row" id="rdMini"></div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="ctrlModal" onclick="if(event.target===this)closeCtrlModal()">
+  <div class="ctrl-box">
+    <button class="modal-close" onclick="closeCtrlModal()"><svg class="ico"><use href="#i-x"/></svg></button>
+    <h3 id="ctrlTitle">레플리카 선택</h3>
+    <div class="ctrl-search"><svg class="ico"><use href="#i-search"/></svg><input id="ctrlSearch" placeholder="레플리카 ID 검색..." oninput="renderCtrlList()"></div>
+    <label class="ctrl-all"><input type="checkbox" id="ctrlAll" onchange="toggleCtrlAll()"><span class="switch"></span> 전체 선택</label>
+    <div class="ctrl-list" id="ctrlList"></div>
+    <div class="ctrl-foot">
+      <button class="ctrl-cancel" onclick="closeCtrlModal()">취소</button>
+      <button class="ctrl-ok" id="ctrlConfirm" onclick="confirmCtrl()">확인</button>
     </div>
   </div>
 </div>

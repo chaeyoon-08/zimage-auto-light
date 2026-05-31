@@ -1,11 +1,14 @@
 // ───────── API helpers ─────────
-async function j(u){const r=await fetch(u,{cache:'no-store'});if(!r.ok)throw new Error(r.status);return r.json();}
+async function j(u){const ctrl=new AbortController();const t=setTimeout(()=>ctrl.abort(),15000);
+  try{const r=await fetch(u,{cache:'no-store',signal:ctrl.signal});if(!r.ok)throw new Error(r.status);return r.json();}
+  finally{clearTimeout(t);}}
 async function post(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});const d=await r.json().catch(()=>({}));return{ok:r.ok,status:r.status,data:d};}
 
 // ───────── 상태 ─────────
 let TAB='gen', galFilter='all', selRep=null, MODEL={name:'Z-Image-Turbo',dtype:'uint4'};
 let REPS=[], REPS_RAW=[], IMAGES=[], RES=null, CONDS=[], selectedConfig=null;
 let loaded={gal:false,reps:false,cards:false,img:false};   // 첫 fetch 완료 여부 (로딩 스피너 표시용)
+let repStore={};   // 한 번 본 레플리카는 계속 보관(누적) → 자리 고정·안 사라짐
 let curImg=null, mPromptVal='', mSeedVal='', mReplicaVal='', rdReplica=null, rdRange='live';
 let cond={status:'all',sort:'name'};
 let recentIds=[], recentMode=false;          // 결과 버튼: 방금 생성한 이미지 id + NEW 배지 모드
@@ -138,30 +141,65 @@ function showResult(){
 // ───────── 잡 제어 ─────────
 async function jobCtrl(a){await post('/api/job/'+a,{});poll();}
 
+// ───────── 타겟 제어 모달 (pause/resume/cancel) ─────────
+// 제어 버튼 → 대상 레플리카 목록 모달(체크박스·전체선택·검색) → 확인 시 /api/control 로 명령.
+// 대상 상태: pause=running만 / resume=paused만 / cancel=running·paused.
+let ctrlAction=null;
+function openControlModal(action){
+  ctrlAction=action;
+  const t={pause:'일시중지할 레플리카 선택',resume:'재개할 레플리카 선택',cancel:'취소할 레플리카 선택'};
+  document.getElementById('ctrlTitle').textContent=t[action]||'레플리카 선택';
+  document.getElementById('ctrlSearch').value='';
+  document.getElementById('ctrlAll').checked=false;
+  renderCtrlList();
+  document.getElementById('ctrlModal').classList.add('on');
+}
+function closeCtrlModal(){ document.getElementById('ctrlModal').classList.remove('on'); ctrlAction=null; }
+function ctrlCandidates(){
+  const ok={pause:['running'],resume:['paused'],cancel:['running','paused']}[ctrlAction]||[];
+  return repsList().filter(r=>!r._stale && ok.includes(r.job_state));
+}
+function renderCtrlList(){
+  const q=(document.getElementById('ctrlSearch').value||'').toLowerCase();
+  const list=ctrlCandidates().filter(r=>(r.replica||'').toLowerCase().includes(q));
+  const el=document.getElementById('ctrlList');
+  if(!list.length){ el.innerHTML='<div class="ctrl-empty">대상 레플리카가 없습니다</div>'; document.getElementById('ctrlAll').checked=false; return; }
+  el.innerHTML=list.map(r=>`<label class="ctrl-item"><input type="checkbox" class="ctrl-cb" value="${r.replica}"><span class="switch"></span><span class="rid">${r.replica}</span><span class="ctrl-st ${r.job_state==='running'?'c-running':'c-paused'}">${(r.job_state||'').toUpperCase()}</span></label>`).join('');
+}
+function toggleCtrlAll(){
+  const on=document.getElementById('ctrlAll').checked;
+  document.querySelectorAll('#ctrlList .ctrl-cb').forEach(cb=>{cb.checked=on;});
+}
+async function confirmCtrl(){
+  const targets=[...document.querySelectorAll('#ctrlList .ctrl-cb:checked')].map(cb=>cb.value);
+  if(!targets.length){ closeCtrlModal(); return; }
+  const action=ctrlAction;
+  try{ await post('/api/control',{targets,action}); }catch(e){}
+  closeCtrlModal(); poll();
+}
+
 // ───────── 폴링 ─────────
 let polling=false;
 async function poll(){
   if(polling) return;          // 이전 poll이 아직 안 끝났으면 건너뜀 (느린 노드에서 요청 쌓임 방지)
   polling=true;
   try{
+    if(!loaded.gal) renderGallery();    // 첫 로드 전(fetch 동안)엔 스피너 표시
+    if(!loaded.reps) renderReplist();
     try{const s=await j('/api/status');renderJob(s);}catch(e){}
     try{RES=await j('/api/resources');renderResources();}catch(e){}
     try{IMAGES=await j('/api/images?source='+(galFilter==='all'?'':galFilter)+(selRep?('&replica='+encodeURIComponent(selRep)):''));loaded.gal=true;renderGallery();}catch(e){}
-    try{const rs=document.getElementById('rStale');const r=await j(rs&&rs.checked?'/api/replicas_all':'/api/replicas');REPS=r.replicas||[];loaded.reps=true;renderReplist();}catch(e){}
+    try{const r=await j('/api/replicas_all');mergeReps(r.replicas);loaded.reps=true;renderReplist();}catch(e){}
   } finally { polling=false; }
 }
 function renderJob(s){
-  const map={running:'RUNNING',paused:'PAUSED',done:'DONE',idle:'IDLE',cancelled:'CANCELLED',error:'ERROR'};
-  const cls={running:'s-running',paused:'s-paused',done:'s-done',idle:'s-idle',cancelled:'s-done',error:'s-error'};
+  const map={running:'RUNNING',paused:'PAUSED',done:'DONE',idle:'IDLE',cancelled:'CANCELLED',error:'ERROR',loading:'LOADING'};
+  const cls={running:'s-running',paused:'s-paused',done:'s-done',idle:'s-idle',cancelled:'s-done',error:'s-error',loading:'s-loading'};
   document.getElementById('jstate').textContent=map[s.state]||s.state.toUpperCase();
   document.getElementById('jstate').className='state-chip '+(cls[s.state]||'s-idle');
   document.getElementById('jc').textContent=s.total?`${s.completed} / ${s.total}`:'–';
   document.getElementById('jbar').style.width=(s.total?Math.round(s.completed/s.total*100):0)+'%';
-  // 제어 버튼 활성/비활성: running=일시중지만 / paused=재개·취소만 / 그 외 전부 잠금
-  const jRunning=s.state==='running', jPaused=s.state==='paused';
-  document.getElementById('btnPause').disabled=!jRunning;
-  document.getElementById('btnResume').disabled=!jPaused;
-  document.getElementById('btnCancel').disabled=!jPaused;
+  // 제어 버튼은 타겟 선택 모달을 열어 여러 레플리카를 지정 → 단일 상태로 잠그지 않음(모달이 대상 유무 판단)
   // 다량·CONFIG 생성(job) 완료 감지 → 결과 버튼 활성
   if(genWatching && ['done','idle','cancelled','error'].includes(s.state)){ genWatching=false; finishGenerate(); }
 }
@@ -185,7 +223,7 @@ function renderResources(){
 // 상태 → 점 색깔 (#4): 죽음 빨강 / 작업중 초록(기본) / 멈춤 노랑 / 끝남·기타 회색
 function dotClass(r){
   if(r._stale) return 'dead';
-  return {running:'',paused:'paused',done:'done',idle:'done',cancelled:'done',error:'dead'}[r.job_state]||'';
+  return {running:'',paused:'paused',done:'done',idle:'done',cancelled:'done',error:'dead',loading:'loading'}[r.job_state]||'';
 }
 // 키 기반 reconcile (#2): 통째로 다시 그리지 않고 있는 건 갱신·없어진 것만 제거 → 깜빡임 방지
 function reconcile(container, items, keyOf, clsOf, htmlOf, onClickOf){
@@ -207,10 +245,21 @@ function reconcile(container, items, keyOf, clsOf, htmlOf, onClickOf){
 function setHTML(el, html){ if(el && el.__html!==html){ el.innerHTML=html; el.__html=html; } }
 // 로딩 스피너(천천히 도는 원 + 문구). 실제 내용이 오면 reconcile/reconcileThumbs가 알아서 걷어냄.
 function loadingHTML(msg){ return '<div class="loading-box"><div class="spinner"></div><span>'+msg+'</span></div>'; }
+// 레플리카 누적: 응답에 온 건 갱신·추가하되 절대 제거 안 함 → 한 번 박힌 상자는 안 사라짐.
+function mergeReps(list){ const t=Date.now(); (list||[]).forEach(r=>{ r._seen=t; repStore[r.replica]=r; }); }
+// 화면용 목록: ID순 고정 정렬. 죽음 판정은 서버 _stale 이 주(노하드 대비 120초/로딩 600초).
+// 여기 무소식 임계는 서버가 목록에서 아예 뺐을 때의 백업 — 서버와 동일하게(로딩은 더 길게) 맞춘다.
+function repsList(){ const t=Date.now();
+  return Object.values(repStore)
+    .map(r=>{ const limit = (r.job_state==='loading') ? 600000 : 120000;
+              return { ...r, _stale: !!r._stale || (t-(r._seen||0) > limit) }; })
+    .sort((a,b)=>(a.replica||'').localeCompare(b.replica||'')); }
 function renderReplist(){
   if(!loaded.reps){ setHTML(document.getElementById('replist'), loadingHTML('레플리카 불러오는 중')); return; }
   const q=(document.getElementById('rq').value||'').toLowerCase();
-  const list=REPS.filter(r=>(r.replica||'').toLowerCase().includes(q));
+  const rs=document.getElementById('rStale'); const showDead=rs?rs.checked:true;
+  let list=repsList().filter(r=>(r.replica||'').toLowerCase().includes(q));
+  if(!showDead) list=list.filter(r=>!r._stale);   // 토글 끄면 dead 숨김(이때만 멤버 변동)
   reconcile(document.getElementById('replist'), list,
     r=>r.replica,
     r=>'repitem'+(selRep===r.replica?' sel':'')+(r._stale?' dead':''),
@@ -339,6 +388,7 @@ function viewReplica(id){closeImg();openReplicaModal(id);}
 
 // ───────── 이미지 탭 ─────────
 async function loadImgTab(){
+  if(!loaded.img) renderImgTab();    // 첫 로드 전(fetch 동안)엔 스피너 표시
   try{IMGTAB=await j(`/api/images?scope=${imgScope}&limit=1000`)||[];loaded.img=true;}catch(e){IMGTAB=[];}
   bindImgSeg('iSegType','type');bindImgSeg('iSegSort','sort');
   renderImgTab();
@@ -435,22 +485,32 @@ async function doRegen(){
 
 // ───────── 대시보드 ─────────
 async function reloadReplicas(){
-  const stale=document.getElementById('cStale').checked;
-  try{const r=await j(stale?'/api/replicas_all':'/api/replicas');
-    REPS_RAW=r.replicas||[];loaded.cards=true;renderSummary(r.summary);renderCards();}catch(e){}
+  try{
+    if(!loaded.cards) renderCards();    // 첫 로드 전(fetch 동안)엔 스피너 표시
+    const r=await j('/api/replicas_all');
+    mergeReps(r.replicas);loaded.cards=true;renderSummary();renderCards();
+  }catch(e){}
 }
-function renderSummary(s){if(!s)return;
-  const alive=REPS_RAW.filter(r=>!r._stale);
+function renderSummary(){
+  const reps=repsList();
+  const alive=reps.filter(r=>!r._stale);
+  const st={running:0,paused:0,done:0,dead:0};
+  reps.forEach(r=>{ if(r._stale){st.dead++;return;}
+    if(r.job_state==='running')st.running++;
+    else if(r.job_state==='paused')st.paused++;
+    else st.done++; });
+  const totGen=reps.reduce((a,r)=>a+(r.generated||0),0);
   const totTp=Math.round(alive.reduce((a,r)=>a+(r.throughput_hr||0),0));
   const busyVals=alive.map(r=>r.busy_ratio).filter(v=>v!=null);
   const avgBusy=busyVals.length?Math.round(busyVals.reduce((a,b)=>a+b,0)/busyVals.length):null;
-  const st=s.states||{running:s.running||0,paused:0,done:0,dead:0};
+  const utilVals=alive.map(r=>r.util).filter(v=>v!=null);
+  const avgUtil=utilVals.length?Math.round(utilVals.reduce((a,b)=>a+b,0)/utilVals.length):null;
   const ic=id=>`<svg class="ico sum-ico"><use href="#${id}"/></svg>`;
   // 상태 분포 (running/paused/done/dead) — 아이콘+개수 칩
   const stateCell=(cls,icon,n)=>`<span class="st-pill ${cls}"><svg class="ico"><use href="#${icon}"/></svg>${n}</span>`;
   setHTML(document.getElementById('summary'),`
-    <div class="sum"><div class="k">${ic('i-layers')}레플리카</div><div class="v">${s.replicas} <small>개</small></div></div>
-    <div class="sum"><div class="k">${ic('i-image')}총 생성 이미지</div><div class="v">${s.total_generated}</div></div>
+    <div class="sum"><div class="k">${ic('i-layers')}레플리카</div><div class="v"><span style="color:var(--purple)">${alive.length}</span><span style="color:var(--text-dim);font-weight:400;margin:0 6px">·</span><span style="color:var(--text)">${reps.length-alive.length}</span></div></div>
+    <div class="sum"><div class="k">${ic('i-image')}총 생성 이미지</div><div class="v">${totGen}</div></div>
     <div class="sum sum-wide"><div class="k">${ic('i-activity')}상태</div>
       <div class="st-row">
         ${stateCell('run','i-play',st.running)}
@@ -460,10 +520,10 @@ function renderSummary(s){if(!s)return;
       </div></div>
     <div class="sum"><div class="k">${ic('i-zap')}전체 시간당 생성</div><div class="v">${totTp} <small>장/h</small></div></div>
     <div class="sum"><div class="k">${ic('i-gauge')}평균 가동률</div><div class="v">${avgBusy??'–'} <small>%</small></div></div>
-    <div class="sum"><div class="k">${ic('i-cpu')}평균 GPU Util</div><div class="v">${s.avg_util??'–'} <small>%</small></div></div>`);
+    <div class="sum"><div class="k">${ic('i-cpu')}평균 GPU Util</div><div class="v">${avgUtil??'–'} <small>%</small></div></div>`);
 }
 function condBadgeCount(){let n=0;if(cond.status!=='all')n++;if(cond.sort!=='name')n++;
-  if(document.getElementById('cOver').checked)n++;if(document.getElementById('cStale').checked)n++;return n;}
+  if(document.getElementById('cOver').checked)n++;return n;}
 function toggleCond(){document.getElementById('condPop').classList.toggle('on');}
 function bindSeg(segId,key){[...document.getElementById(segId).children].forEach(b=>b.onclick=()=>{
   [...document.getElementById(segId).children].forEach(x=>x.classList.remove('on'));b.classList.add('on');
@@ -473,7 +533,8 @@ function renderCards(){
   const q=(document.getElementById('dq').value||'').toLowerCase();
   const lim=+document.getElementById('limitDash').value||null;
   const overOnly=document.getElementById('cOver').checked;
-  let list=REPS_RAW.filter(r=>(r.replica||'').toLowerCase().includes(q));
+  let list=repsList().filter(r=>(r.replica||'').toLowerCase().includes(q));
+  const cs=document.getElementById('cStale'); if(cs&&!cs.checked) list=list.filter(r=>!r._stale);  // 토글 끄면 dead 숨김
   if(cond.status!=='all')list=list.filter(r=>(r.job_state||'')===cond.status);
   if(overOnly&&lim)list=list.filter(r=>r.vram_used_gb!=null&&r.vram_used_gb>lim);
   const sorters={name:(a,b)=>(a.replica||'').localeCompare(b.replica||''),
@@ -484,8 +545,8 @@ function renderCards(){
   // 배지
   const n=condBadgeCount();const badge=document.getElementById('condBadge');
   badge.textContent=n;badge.classList.toggle('hide',n===0);
-  document.getElementById('dashCount').textContent=`${list.length} / ${REPS_RAW.length} 표시`;
-  const cmap={running:'c-running',done:'c-done',paused:'c-paused',idle:'c-done',cancelled:'c-done',error:'c-done'};
+  document.getElementById('dashCount').textContent=`${list.length} / ${repsList().length} 표시`;
+  const cmap={running:'c-running',done:'c-done',paused:'c-paused',idle:'c-done',cancelled:'c-done',error:'c-done',loading:'c-loading'};
   reconcile(document.getElementById('cards'), list,
     r=>r.replica,
     r=>{const over=lim&&r.vram_used_gb!=null&&r.vram_used_gb>lim;return 'rcard'+(over?' over':'');},
@@ -523,7 +584,7 @@ function paintReplica(r){
   const dead=r._stale;
   document.getElementById('rdId').textContent=r.replica;
   document.getElementById('rdChip').textContent=dead?'DEAD':(r.job_state||'').toUpperCase();
-  document.getElementById('rdChip').className='chip '+(dead?'c-dead':({running:'c-running',paused:'c-paused'}[r.job_state]||'c-done'));
+  document.getElementById('rdChip').className='chip '+(dead?'c-dead':({running:'c-running',paused:'c-paused',loading:'c-loading'}[r.job_state]||'c-done'));
   const ai=ageInfo(r);
   document.getElementById('rdDot').className='dot '+ai.dot;
   document.getElementById('rdAge').textContent=ai.txt;
@@ -537,6 +598,16 @@ function paintReplica(r){
   const pct=r.job_total?Math.round(r.job_completed/r.job_total*100):0;
   document.getElementById('rdProgPct').textContent=pct+'%';
   document.getElementById('rdProgBar').style.width=pct+'%';
+  // GPU 응답 배지 — dead면 status가 최신이 아니므로 숨김
+  const gpuEl=document.getElementById('rdGpu');
+  if(dead||r.gpu_ok==null){ gpuEl.textContent=''; gpuEl.className='gpu-badge'; }
+  else if(r.gpu_ok){ gpuEl.textContent='GPU 정상'; gpuEl.className='gpu-badge ok'; }
+  else{ gpuEl.textContent='GPU 이상'; gpuEl.className='gpu-badge bad'; }
+  // 취소/오류 사유
+  const reasonEl=document.getElementById('rdReason');
+  if(r.job_state==='cancelled'){ reasonEl.textContent=`취소 — ${r.job_message||((r.job_completed||0)+'장 후 취소')} (${r.job_completed||0}/${r.job_total||0})`; reasonEl.className='rd-reason show cancelled'; }
+  else if(r.job_state==='error'){ reasonEl.textContent=`오류 — ${r.job_message||'알 수 없음'}`; reasonEl.className='rd-reason show err'; }
+  else{ reasonEl.textContent=''; reasonEl.className='rd-reason'; }
   const f=v=>v==null?'–':v;
   const r1=v=>v==null?'–':(Math.round(v*10)/10);   // 소수 첫째자리 반올림
   setHTML(document.getElementById('rdProgStats'),`
@@ -577,7 +648,7 @@ function paintReplica(r){
 function fmtDur(s){ if(s<60)return s+'초'; const m=Math.floor(s/60),ss=s%60; if(m<60)return m+'분 '+ss+'초'; const h=Math.floor(m/60); return h+'시간 '+(m%60)+'분'; }
 async function openReplicaModal(id){
   rdReplica=id;rdRange='live';
-  let r=REPS_RAW.find(x=>x.replica===id)||REPS.find(x=>x.replica===id);
+  let r=repsList().find(x=>x.replica===id);
   if(!r){try{const d=await j('/api/replicas_all');r=(d.replicas||[]).find(x=>x.replica===id);}catch(e){}}
   if(!r)return;
   paintReplica(r);

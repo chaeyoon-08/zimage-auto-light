@@ -64,15 +64,17 @@ RUN_ID_AUTO = not _run_id_env   # 사용자가 지정 안 함 → 자동 생성
 if _run_id_env:
     RUN_ID = _run_id_env
 else:
-    # RUN_ID 미지정 시: 같은 배포(ReplicaSet)의 파드끼리 같은 run을 써야 서로의 상태/이미지가 보인다.
-    # 파드 이름 <배포>-<RS해시>-<파드해시> 에서 마지막 파드해시만 떼면 같은 배포의 파드끼리 동일.
-    # 예: dep2520-75f955bf6f-5phj7 → auto-dep2520-75f955bf6f
-    _parts = REPLICA_ID.rsplit("-", 1)
-    _base = _parts[0] if (len(_parts) == 2 and _parts[1]) else REPLICA_ID
+    # RUN_ID 미지정 시: 같은 '배포'의 파드는 항상 같은 run 폴더를 써야 서로 보인다.
+    # 파드 이름 <배포>-<RS해시>-<파드해시> 에서 RS해시·파드해시 둘 다 떼고 배포명만 남긴다.
+    # → 재배포(새 ReplicaSet)·노드 교체로 RS가 바뀌어도 같은 폴더를 공유한다.
+    # 예: dep2520-5bd79945f5-8rtfc → auto-dep2520
+    _parts = REPLICA_ID.rsplit("-", 2)
+    _base = _parts[0] if len(_parts) == 3 else REPLICA_ID
     RUN_ID = "auto-" + _base
 CURRENT_DIR = WORK_DIR / "current" / f"run_{RUN_ID}"   # UI 렌더링용 (실행 격리 키)
 STATUS_DIR = CURRENT_DIR / "status"
 HISTORY_DIR = CURRENT_DIR / "history"
+CONTROL_DIR = CURRENT_DIR / "control"   # 타겟 제어 명령함: UI가 control/<파드>.json 에 쓰면 해당 레플리카가 읽어 실행
 STARTED_AT = dt.datetime.now()      # 레플리카 시작 시각 (uptime용)
 
 DEFAULT_WIDTH = int(os.getenv("ZIMG_WIDTH", "1024"))
@@ -84,8 +86,10 @@ GEN_COUNT = os.getenv("GEN_COUNT", "").strip()
 CONDITIONS_FILE = os.getenv("CONDITIONS_FILE", "").strip()
 RANDOM_PICK = os.getenv("RANDOM_PICK", "false").strip().lower() in ("1", "true", "yes", "y")
 
-STALE_SECONDS = float(os.getenv("STALE_SECONDS", "90"))  # 이 시간 넘게 갱신 없으면 죽은 레플리카로 간주. tier3 저사양 노드 배려(한 장 생성 동안 갱신이 밀릴 수 있어 넉넉히)
-HEARTBEAT_SEC = float(os.getenv("HEARTBEAT_SEC", "3"))    # status 갱신 주기
+STALE_SECONDS = float(os.getenv("STALE_SECONDS", "120"))  # 이 시간 넘게 갱신 없으면 죽은 레플리카로 간주. 노하드(디스크리스) tier3 배려 — status 쓰기가 네트워크로 밀릴 수 있어 넉넉히
+LOAD_STALE_SECONDS = float(os.getenv("LOAD_STALE_SECONDS", "600"))  # 'loading'(모델 로드 중)에만 적용하는 임계. 노하드에선 모델 로드 자체가 네트워크라 오래 걸려 죽음 오판 방지
+REP_CACHE_SEC = float(os.getenv("REP_CACHE_SEC", "1.5"))  # status 폴더 읽기 캐시. 노하드 대비 — UI 폴링마다 폴더 전체를 다시 읽지 않음(이 시간만큼 화면이 살짝 지연될 수 있음)
+HEARTBEAT_SEC = float(os.getenv("HEARTBEAT_SEC", "3"))    # status 갱신 + control 확인 주기(한 사이클로 묶음)
 HISTORY_SEC = float(os.getenv("HISTORY_SEC", "10"))       # 시계열 로우데이터 샘플 주기
 RECENT_KEEP = int(os.getenv("RECENT_KEEP", "180"))        # recent 보관 점수 (10s×180=30분)
 ROLLUP_KEEP = int(os.getenv("ROLLUP_KEEP", "2880"))       # rollup 보관 점수 (1min×2880=48시간)
@@ -99,13 +103,27 @@ _STATIC_DIR = Path(__file__).parent / "static"
 if _STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
-for d in (OUTPUT_DIR, OUTPUT_AUTO_DIR, OUTPUT_MANUAL_DIR, CURRENT_DIR, STATUS_DIR, HISTORY_DIR):
+for d in (OUTPUT_DIR, OUTPUT_AUTO_DIR, OUTPUT_MANUAL_DIR, CURRENT_DIR, STATUS_DIR, HISTORY_DIR, CONTROL_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 print(f"[ INFO ] REPLICA(pod) = {REPLICA_ID}", flush=True)
 print(f"[ INFO ] RUN_ID = {RUN_ID}" + ("  (자동 생성)" if RUN_ID_AUTO else ""), flush=True)
 print(f"[ INFO ] OUTPUT_DIR(보존) = {OUTPUT_DIR}  (auto/ , manual/)", flush=True)
 print(f"[ INFO ] CURRENT_DIR(UI)  = {CURRENT_DIR}", flush=True)
+
+# 모델 로딩 동안에도 화면에 즉시 뜨도록, 로드 시작 전 'loading' 상태를 한 번 기록
+try:
+    _ld_target = STATUS_DIR / f"{REPLICA_ID}.json"
+    _ld_tmp = STATUS_DIR / f".{REPLICA_ID}.json.tmp"
+    _ld_tmp.write_text(json.dumps({
+        "replica": REPLICA_ID,
+        "updated": dt.datetime.now().isoformat(timespec="seconds"),
+        "started_at": STARTED_AT.isoformat(timespec="seconds"),
+        "job_state": "loading", "generated": 0,
+    }, ensure_ascii=False), encoding="utf-8")
+    os.replace(_ld_tmp, _ld_target)   # 원자적 — 컨테이너 인식의 첫 신호라 부분쓰기 방지
+except Exception:
+    pass
 
 # ─────────────────────────────────────────────────────────────
 # 모델 로드
@@ -138,17 +156,23 @@ def _stat(seq):
 def _gpu_snapshot():
     """현재 GPU/RAM 스냅샷 (GB)."""
     out = {"vram_used_gb": None, "vram_total_gb": None, "util": None,
-           "ram_used_gb": None, "ram_total_gb": None, "ram_percent": None}
+           "ram_used_gb": None, "ram_total_gb": None, "ram_percent": None, "gpu_ok": None}
     if torch.cuda.is_available():
-        free_b, total_b = torch.cuda.mem_get_info()
-        out["vram_used_gb"] = round((total_b - free_b) / 1024**3, 2)
-        out["vram_total_gb"] = round(total_b / 1024**3, 1)
+        try:
+            free_b, total_b = torch.cuda.mem_get_info()
+            out["vram_used_gb"] = round((total_b - free_b) / 1024**3, 2)
+            out["vram_total_gb"] = round(total_b / 1024**3, 1)
+            out["gpu_ok"] = True   # CUDA 응답 + VRAM 조회 성공 → GPU 살아있음
+        except Exception:
+            out["gpu_ok"] = False  # CUDA는 있다는데 조회 실패 → GPU 이상
         if _NVML:
             try:
                 h = pynvml.nvmlDeviceGetHandleByIndex(0)
                 out["util"] = pynvml.nvmlDeviceGetUtilizationRates(h).gpu
             except Exception:
                 pass
+    else:
+        out["gpu_ok"] = False      # CUDA 자체가 안 보임
     if psutil is not None:
         vm = psutil.virtual_memory()
         out["ram_used_gb"] = round(vm.used / 1024**3, 1)
@@ -366,22 +390,70 @@ def _status_payload():
         "job_state": js["state"],
         "job_total": js["total"],
         "job_completed": js["completed"],
+        "job_message": js["message"],     # "N장 후 취소" / "N장 완료" 등 — UI 상세에 사유 표시
         "config_file": js["config_file"],
+        "gpu_ok": snap.get("gpu_ok"),      # 레플리카 자체 GPU 응답 여부(살아있는데 GPU만 이상한 경우 구분용)
     }
 
 
+_hb_lock = threading.Lock()
+
 def _write_heartbeat():
+    # 노하드(디스크리스) 대비: 임시 파일에 쓴 뒤 원자적 교체 → 네트워크 끊김으로 인한 부분쓰기/깨진 json 방지.
+    # payload 생성은 lock 밖(가벼움), 파일 교체만 직렬화(heartbeat 스레드 + 생성 워커 동시 쓰기 충돌 방지).
     try:
-        (STATUS_DIR / f"{REPLICA_ID}.json").write_text(
-            json.dumps(_status_payload(), ensure_ascii=False), encoding="utf-8")
+        payload = json.dumps(_status_payload(), ensure_ascii=False)
     except Exception as e:
-        print(f"[ WARN ] 하트비트 실패: {e}", flush=True)
+        print(f"[ WARN ] 하트비트 payload 실패: {e}", flush=True); return
+    try:
+        with _hb_lock:
+            target = STATUS_DIR / f"{REPLICA_ID}.json"
+            tmp = STATUS_DIR / f".{REPLICA_ID}.json.tmp"
+            tmp.write_text(payload, encoding="utf-8")
+            os.replace(tmp, target)
+    except Exception as e:
+        print(f"[ WARN ] 하트비트 쓰기 실패: {e}", flush=True)
 
 
 def _heartbeat_loop():
     while True:
+        _check_control()    # control 읽기 + status 쓰기를 한 사이클로 묶어 노하드 네트워크 왕복 최소화
         _write_heartbeat()
         time.sleep(HEARTBEAT_SEC)
+
+
+# ─────────────────────────────────────────────────────────────
+# 타겟 제어: 각 레플리카가 자기 control/<파드>.json 을 읽어 명령 실행
+#   - UI는 /api/control 로 명령을 써두고, 해당 레플리카가 읽어서 자기 job 에 적용
+#   - 서비스 URL 은 임의 파드로 분배되므로, '쓰기'를 공유 저장소로 우회해 타겟을 지정한다
+#   - 재시작한 레플리카가 옛 명령을 잘못 실행하지 않게, 자기 시작 시각 이후 명령만 실행
+#   - 노하드(디스크리스) 대비: 별도 폴링 스레드를 두지 않고 heartbeat 사이클에 묶어 네트워크
+#     왕복을 최소화. 생성 중에도 heartbeat 스레드가 계속 돌아 pause/cancel 이 반영된다.
+# ─────────────────────────────────────────────────────────────
+_last_control_ts = None
+
+def _check_control():
+    """control/<파드>.json 에 새 명령이 있으면 1건 적용."""
+    global _last_control_ts
+    cf = CONTROL_DIR / f"{REPLICA_ID}.json"
+    try:
+        if cf.exists():
+            d = json.loads(cf.read_text(encoding="utf-8"))
+            ts = d.get("ts")
+            if ts and ts != _last_control_ts:
+                _last_control_ts = ts
+                try:
+                    cmd_dt = dt.datetime.fromisoformat(ts)
+                except Exception:
+                    cmd_dt = None
+                # 시작 이후에 쓰인 명령만 실행(재시작 시 잔존 명령 무시)
+                if cmd_dt is None or cmd_dt >= STARTED_AT:
+                    act = d.get("action")
+                    if act == "pause":  job.pause()
+                    elif act == "resume": job.resume()
+                    elif act == "cancel": job.cancel()
+    except Exception as e:
+        print(f"[ WARN ] control 확인 실패: {e}", flush=True)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -544,6 +616,27 @@ def job_cancel():
     job.cancel(); return job.status()
 
 
+@app.post("/api/control")
+def control(targets: list = Body(...), action: str = Body(...)):
+    """타겟 제어: 선택한 레플리카들의 control/<파드>.json 에 명령을 기록한다.
+    이 요청은 임의 파드가 받아도 되며(공유 저장소), 각 타겟 레플리카가 자기 파일을 폴링해 실행한다.
+    action: pause | resume | cancel."""
+    if action not in ("pause", "resume", "cancel"):
+        raise HTTPException(400, "action 은 pause|resume|cancel 중 하나여야 합니다.")
+    if not isinstance(targets, list) or not targets:
+        raise HTTPException(400, "targets(레플리카 이름 목록)가 비어 있습니다.")
+    ts = dt.datetime.now().isoformat()   # microsecond 포함 → 같은 초 연속 명령도 구분
+    written = []
+    for t in targets:
+        try:
+            (CONTROL_DIR / f"{t}.json").write_text(
+                json.dumps({"action": action, "ts": ts}, ensure_ascii=False), encoding="utf-8")
+            written.append(t)
+        except Exception as e:
+            print(f"[ WARN ] control 기록 실패({t}): {e}", flush=True)
+    return {"action": action, "ts": ts, "written": written}
+
+
 @app.get("/api/resources")
 def resources():
     """이 레플리카(응답한 레플리카)의 현재 자원 + 생성 통계."""
@@ -598,10 +691,16 @@ def list_replicas_all():
     return _replicas(include_stale=True)
 
 
-def _replicas(include_stale=False):
+_rep_cache = {"ts": 0.0, "reps": None}
+
+def _read_status_dir():
+    """status 폴더 전체를 읽어 레플리카 dict 리스트(+_age_s,_stale) 반환.
+    노하드 대비: REP_CACHE_SEC 동안 결과를 캐시해 UI 폴링마다 폴더 전체를 다시 읽지 않는다."""
+    now_m = time.time()
+    if _rep_cache["reps"] is not None and (now_m - _rep_cache["ts"]) < REP_CACHE_SEC:
+        return _rep_cache["reps"]
     now = dt.datetime.now()
     reps = []
-    dead_count = 0
     try:
         for p in STATUS_DIR.glob("*.json"):
             try:
@@ -619,16 +718,22 @@ def _replicas(include_stale=False):
             except Exception:
                 pass
             r["_age_s"] = round(age, 1) if age is not None else None
-            r["_stale"] = (age is not None and age > STALE_SECONDS)
-            if r["_stale"]:
-                dead_count += 1          # 죽음은 포함 여부와 무관하게 항상 카운트
-                if not include_stale:
-                    continue
+            # 모델 로드 중('loading')은 노하드에서 오래 걸릴 수 있어 더 관대한 임계 적용
+            limit = LOAD_STALE_SECONDS if r.get("job_state") == "loading" else STALE_SECONDS
+            r["_stale"] = (age is not None and age > limit)
             reps.append(r)
     except Exception:
         pass
     reps.sort(key=lambda r: r.get("replica", ""))
-    alive = [r for r in reps if not r.get("_stale")]
+    _rep_cache["ts"] = now_m; _rep_cache["reps"] = reps
+    return reps
+
+
+def _replicas(include_stale=False):
+    reps_all = _read_status_dir()
+    dead_count = sum(1 for r in reps_all if r.get("_stale"))
+    reps = reps_all if include_stale else [r for r in reps_all if not r.get("_stale")]
+    alive = [r for r in reps_all if not r.get("_stale")]
     total_gen = sum(r.get("generated", 0) or 0 for r in alive)
     running = [r for r in alive if r.get("job_state") == "running"]
     paused = [r for r in alive if r.get("job_state") == "paused"]
