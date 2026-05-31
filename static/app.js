@@ -5,6 +5,7 @@ async function post(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-
 // ───────── 상태 ─────────
 let TAB='gen', galFilter='all', selRep=null, MODEL={name:'Z-Image-Turbo',dtype:'uint4'};
 let REPS=[], REPS_RAW=[], IMAGES=[], RES=null, CONDS=[], selectedConfig=null;
+let loaded={gal:false,reps:false,cards:false,img:false};   // 첫 fetch 완료 여부 (로딩 스피너 표시용)
 let curImg=null, mPromptVal='', mSeedVal='', mReplicaVal='', rdReplica=null, rdRange='live';
 let cond={status:'all',sort:'name'};
 let recentIds=[], recentMode=false;          // 결과 버튼: 방금 생성한 이미지 id + NEW 배지 모드
@@ -145,8 +146,8 @@ async function poll(){
   try{
     try{const s=await j('/api/status');renderJob(s);}catch(e){}
     try{RES=await j('/api/resources');renderResources();}catch(e){}
-    try{IMAGES=await j('/api/images?source='+(galFilter==='all'?'':galFilter)+(selRep?('&replica='+encodeURIComponent(selRep)):''));renderGallery();}catch(e){}
-    try{const r=await j('/api/replicas');REPS=r.replicas||[];renderReplist();}catch(e){}
+    try{IMAGES=await j('/api/images?source='+(galFilter==='all'?'':galFilter)+(selRep?('&replica='+encodeURIComponent(selRep)):''));loaded.gal=true;renderGallery();}catch(e){}
+    try{const rs=document.getElementById('rStale');const r=await j(rs&&rs.checked?'/api/replicas_all':'/api/replicas');REPS=r.replicas||[];loaded.reps=true;renderReplist();}catch(e){}
   } finally { polling=false; }
 }
 function renderJob(s){
@@ -189,7 +190,7 @@ function dotClass(r){
 // 키 기반 reconcile (#2): 통째로 다시 그리지 않고 있는 건 갱신·없어진 것만 제거 → 깜빡임 방지
 function reconcile(container, items, keyOf, clsOf, htmlOf, onClickOf){
   if(!items.length){ container.innerHTML='<div class="recon-empty" style="color:var(--text-dim);font-size:12px;padding:14px;text-align:center;grid-column:1/-1">검색 결과 없음</div>'; return; }
-  const empty=container.querySelector('.recon-empty'); if(empty) container.innerHTML='';
+  const empty=container.querySelector('.recon-empty,.loading-box'); if(empty) container.innerHTML='';
   const esc=s=>String(s).replace(/["\\]/g,c=>'\\'+c);
   const keys=new Set();
   items.forEach(it=>{
@@ -204,12 +205,15 @@ function reconcile(container, items, keyOf, clsOf, htmlOf, onClickOf){
 }
 // 폴링 패널용: 내용(html)이 실제로 바뀐 경우에만 갱신 → 매 사이클 통째 재생성/깜빡임 방지
 function setHTML(el, html){ if(el && el.__html!==html){ el.innerHTML=html; el.__html=html; } }
+// 로딩 스피너(천천히 도는 원 + 문구). 실제 내용이 오면 reconcile/reconcileThumbs가 알아서 걷어냄.
+function loadingHTML(msg){ return '<div class="loading-box"><div class="spinner"></div><span>'+msg+'</span></div>'; }
 function renderReplist(){
+  if(!loaded.reps){ setHTML(document.getElementById('replist'), loadingHTML('레플리카 불러오는 중')); return; }
   const q=(document.getElementById('rq').value||'').toLowerCase();
   const list=REPS.filter(r=>(r.replica||'').toLowerCase().includes(q));
   reconcile(document.getElementById('replist'), list,
     r=>r.replica,
-    r=>'repitem'+(selRep===r.replica?' sel':''),
+    r=>'repitem'+(selRep===r.replica?' sel':'')+(r._stale?' dead':''),
     r=>`<span class="rid">${r.replica}</span>
       <span class="meta"><span class="dot ${dotClass(r)}"></span>${r.job_completed||0}/${r.job_total||0} · ${r.util??'–'}%</span>`,
     r=>selReplica(r.replica));
@@ -233,6 +237,7 @@ function clearGalFilter(){
 }
 function renderGallery(){
   const el=document.getElementById('gallery');
+  if(!loaded.gal){ setHTML(el, loadingHTML('이미지 불러오는 중')); return; }
   let list=IMAGES;
   if(recentMode){ // 방금 생성 모드: MANUAL을 최신순으로 (recentIds는 NEW 배지로 강조)
     list=[...IMAGES].sort((a,b)=>String(b.finished||b.created||'').localeCompare(String(a.finished||a.created||'')));
@@ -334,7 +339,7 @@ function viewReplica(id){closeImg();openReplicaModal(id);}
 
 // ───────── 이미지 탭 ─────────
 async function loadImgTab(){
-  try{IMGTAB=await j(`/api/images?scope=${imgScope}&limit=1000`)||[];}catch(e){IMGTAB=[];}
+  try{IMGTAB=await j(`/api/images?scope=${imgScope}&limit=1000`)||[];loaded.img=true;}catch(e){IMGTAB=[];}
   bindImgSeg('iSegType','type');bindImgSeg('iSegSort','sort');
   renderImgTab();
 }
@@ -352,6 +357,7 @@ function imgVal(id){return (document.getElementById(id)?.value||'').trim();}
 function imgCondBadge(){let n=0;if(imgCond.type!=='all')n++;if(imgCond.sort!=='new')n++;
   ['iqPrompt','iqSeed','iqReplica','iqConfig'].forEach(id=>{if(imgVal(id))n++;});return n;}
 function renderImgTab(){
+  if(!loaded.img){ setHTML(document.getElementById('imgGrid'), loadingHTML('이미지 불러오는 중')); return; }
   const q=imgVal('iq').toLowerCase();
   const fP=imgVal('iqPrompt').toLowerCase(), fS=imgVal('iqSeed'),
         fR=imgVal('iqReplica').toLowerCase(), fC=imgVal('iqConfig').toLowerCase();
@@ -431,7 +437,7 @@ async function doRegen(){
 async function reloadReplicas(){
   const stale=document.getElementById('cStale').checked;
   try{const r=await j(stale?'/api/replicas_all':'/api/replicas');
-    REPS_RAW=r.replicas||[];renderSummary(r.summary);renderCards();}catch(e){}
+    REPS_RAW=r.replicas||[];loaded.cards=true;renderSummary(r.summary);renderCards();}catch(e){}
 }
 function renderSummary(s){if(!s)return;
   const alive=REPS_RAW.filter(r=>!r._stale);
@@ -463,6 +469,7 @@ function bindSeg(segId,key){[...document.getElementById(segId).children].forEach
   [...document.getElementById(segId).children].forEach(x=>x.classList.remove('on'));b.classList.add('on');
   cond[key]=b.dataset.v;renderCards();});}
 function renderCards(){
+  if(!loaded.cards){ setHTML(document.getElementById('cards'), loadingHTML('레플리카 불러오는 중')); return; }
   const q=(document.getElementById('dq').value||'').toLowerCase();
   const lim=+document.getElementById('limitDash').value||null;
   const overOnly=document.getElementById('cOver').checked;
@@ -486,7 +493,7 @@ function renderCards(){
       const over=lim&&r.vram_used_gb!=null&&r.vram_used_gb>lim;
       const vt=r.vram_total_gb||32;const vp=Math.min(100,(r.vram_used_gb||0)/vt*100);
       const dead=r._stale;
-      return `<div class="top"><span class="rid">${r.replica}</span><span class="chip ${dead?'c-done':(cmap[r.job_state]||'c-done')}">${dead?'DEAD':(r.job_state||'').toUpperCase()}</span></div>
+      return `<div class="top"><span class="rid">${r.replica}</span><span class="chip ${dead?'c-dead':(cmap[r.job_state]||'c-done')}">${dead?'DEAD':(r.job_state||'').toUpperCase()}</span></div>
       <div class="rrow"><span class="lbl">GPU VRAM</span><span class="val ${over?'over':''}">${r.vram_used_gb??'–'} <span style="color:var(--text-dim);font-size:11px">/ ${r.vram_total_gb??'–'} GB</span></span></div>
       <div class="rbar2"><i class="${over?'over':''}" style="width:${vp}%"></i></div>
       <div class="rrow"><span class="lbl">GPU Util</span><span class="val">${r.util??'–'} %</span></div>
@@ -516,7 +523,7 @@ function paintReplica(r){
   const dead=r._stale;
   document.getElementById('rdId').textContent=r.replica;
   document.getElementById('rdChip').textContent=dead?'DEAD':(r.job_state||'').toUpperCase();
-  document.getElementById('rdChip').className='chip '+(dead?'c-done':({running:'c-running',paused:'c-paused'}[r.job_state]||'c-done'));
+  document.getElementById('rdChip').className='chip '+(dead?'c-dead':({running:'c-running',paused:'c-paused'}[r.job_state]||'c-done'));
   const ai=ageInfo(r);
   document.getElementById('rdDot').className='dot '+ai.dot;
   document.getElementById('rdAge').textContent=ai.txt;

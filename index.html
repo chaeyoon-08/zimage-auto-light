@@ -107,7 +107,7 @@
       </div>
 
       <div class="panel repsel">
-        <div class="ph"><h2>Replicas</h2></div>
+        <div class="ph"><h2>Replicas</h2><label class="cond-chk ph-chk"><input type="checkbox" id="rStale" onchange="poll()"><span class="switch"></span> 죽은 것 포함</label></div>
         <div class="srow">
           <div class="search"><svg class="ico"><use href="#i-search"/></svg><input id="rq" placeholder="레플리카 ID 검색..." oninput="renderReplist()"></div>
           <button class="all-btn on" id="repAll" onclick="selReplica(null)">All</button>

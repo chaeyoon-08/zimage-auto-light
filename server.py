@@ -84,7 +84,7 @@ GEN_COUNT = os.getenv("GEN_COUNT", "").strip()
 CONDITIONS_FILE = os.getenv("CONDITIONS_FILE", "").strip()
 RANDOM_PICK = os.getenv("RANDOM_PICK", "false").strip().lower() in ("1", "true", "yes", "y")
 
-STALE_SECONDS = float(os.getenv("STALE_SECONDS", "60"))  # 이 시간 넘게 갱신 없으면 죽은 레플리카로 간주 (낮은 사양 GPU 배려)
+STALE_SECONDS = float(os.getenv("STALE_SECONDS", "90"))  # 이 시간 넘게 갱신 없으면 죽은 레플리카로 간주. tier3 저사양 노드 배려(한 장 생성 동안 갱신이 밀릴 수 있어 넉넉히)
 HEARTBEAT_SEC = float(os.getenv("HEARTBEAT_SEC", "3"))    # status 갱신 주기
 HISTORY_SEC = float(os.getenv("HISTORY_SEC", "10"))       # 시계열 로우데이터 샘플 주기
 RECENT_KEEP = int(os.getenv("RECENT_KEEP", "180"))        # recent 보관 점수 (10s×180=30분)
@@ -290,6 +290,7 @@ class JobManager:
                                     float(c.get("guidance", DEFAULT_GUIDANCE)), c.get("seed"),
                                     src, config_file)
                 self.completed += 1
+                _write_heartbeat()   # 매 장 직후 하트비트 강제 갱신 — 무거운 추론으로 주기 스레드가 밀려도 '죽음' 오판 방지
             self.state = "done"; self.message = f"{self.completed}장 완료"; self.job_finished = dt.datetime.now()
         except Exception as e:
             self.state = "error"; self.message = str(e); self.job_finished = dt.datetime.now()
