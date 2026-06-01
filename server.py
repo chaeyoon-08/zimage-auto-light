@@ -750,33 +750,41 @@ def _replicas(include_stale=False):
     return {"run_id": RUN_ID, "summary": summary, "replicas": reps, "stale_seconds": STALE_SECONDS}
 
 
+_img_meta_cache = {}   # path(str) -> meta(dict, _mtime 포함). 메타 json은 생성 시 1회 기록 후 불변 → 한 번 읽으면 재사용
+
 @app.get("/api/images")
 def list_images(replica: str = None, source: str = None, scope: str = "run", limit: int = 1000):
     """메타 json 스캔 → 이미지 목록(최근순).
     scope='run'(기본): 이번 실행(CURRENT_DIR)만. scope='all': 저장소의 모든 실행(run_* 전체 폴더) 집계.
-    replica 필터(파드 이름), source 필터(auto|manual) 옵션."""
+    replica 필터(파드 이름), source 필터(auto|manual) 옵션.
+    노하드 대비: 폴더 목록만 새로 훑고, 이미 읽은 메타는 캐시에서 재사용(매번 전체 재읽기 방지)."""
     if scope == "all":
         runs_root = CURRENT_DIR.parent   # /workspace/current
         dirs = sorted((d for d in runs_root.glob("run_*") if d.is_dir())) if runs_root.exists() else []
     else:
         dirs = [CURRENT_DIR]
-    seen = {}   # id -> (mtime, meta)  : 같은 id면 최신 것만 (실행 간 중복 방지)
+    seen = {}   # id -> meta : 같은 id면 최신 것만 (실행 간 중복 방지)
     for d in dirs:
         try:
             for p in d.glob("*.json"):
-                try:
-                    mt = p.stat().st_mtime
-                    m = json.loads(p.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
+                key = str(p)
+                m = _img_meta_cache.get(key)
+                if m is None:                      # 캐시에 없을 때만 디스크 읽기(= 새로 생긴 메타)
+                    try:
+                        mt = p.stat().st_mtime
+                        m = json.loads(p.read_text(encoding="utf-8"))
+                    except Exception:
+                        continue
+                    m["_mtime"] = mt
+                    _img_meta_cache[key] = m
                 iid = m.get("id") or p.stem
-                if iid in seen and seen[iid][0] >= mt:
+                prev = seen.get(iid)
+                if prev and prev.get("_mtime", 0) >= m.get("_mtime", 0):
                     continue
-                m["_mtime"] = mt
-                seen[iid] = (mt, m)
+                seen[iid] = m
         except Exception:
             continue
-    metas = [v[1] for v in seen.values()]
+    metas = list(seen.values())
     if replica:
         metas = [m for m in metas if m.get("replica") == replica]
     if source:
@@ -784,8 +792,6 @@ def list_images(replica: str = None, source: str = None, scope: str = "run", lim
     metas.sort(key=lambda m: m.get("_mtime", 0), reverse=True)
     if limit and len(metas) > limit:
         metas = metas[:limit]
-    for m in metas:
-        m.pop("_mtime", None)
     return metas
 
 
@@ -796,7 +802,9 @@ def image_file(image_id: str):
     for d in (OUTPUT_AUTO_DIR, OUTPUT_MANUAL_DIR, OUTPUT_DIR / "ui", OUTPUT_DIR):
         path = d / f"{image_id}.png"
         if path.exists():
-            return FileResponse(path, media_type="image/png")
+            # 이미지 id는 고유·불변 → 브라우저가 장기 캐시하도록(한 번 받으면 재다운로드 안 함)
+            return FileResponse(path, media_type="image/png",
+                                headers={"Cache-Control": "public, max-age=31536000, immutable"})
     raise HTTPException(404, "파일이 없습니다.")
 
 

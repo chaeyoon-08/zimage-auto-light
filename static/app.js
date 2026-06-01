@@ -186,22 +186,41 @@ async function poll(){
   try{
     if(!loaded.gal) renderGallery();    // 첫 로드 전(fetch 동안)엔 스피너 표시
     if(!loaded.reps) renderReplist();
-    try{const s=await j('/api/status');renderJob(s);}catch(e){}
+    try{const s=await j('/api/status');checkGenDone(s);}catch(e){}
     try{RES=await j('/api/resources');renderResources();}catch(e){}
     try{IMAGES=await j('/api/images?source='+(galFilter==='all'?'':galFilter)+(selRep?('&replica='+encodeURIComponent(selRep)):''));loaded.gal=true;renderGallery();}catch(e){}
-    try{const r=await j('/api/replicas_all');mergeReps(r.replicas);loaded.reps=true;renderReplist();}catch(e){}
+    try{const r=await j('/api/replicas_all');mergeReps(r.replicas);loaded.reps=true;renderReplist();renderJob();}catch(e){}
   } finally { polling=false; }
 }
-function renderJob(s){
+// Job Status 표시: 레플리카 선택 시 그 레플리카, 선택 안 하면 전체 합계 (응답 1대 랜덤 표시 폐지)
+function renderJob(){
   const map={running:'RUNNING',paused:'PAUSED',done:'DONE',idle:'IDLE',cancelled:'CANCELLED',error:'ERROR',loading:'LOADING'};
   const cls={running:'s-running',paused:'s-paused',done:'s-done',idle:'s-idle',cancelled:'s-done',error:'s-error',loading:'s-loading'};
-  document.getElementById('jstate').textContent=map[s.state]||s.state.toUpperCase();
-  document.getElementById('jstate').className='state-chip '+(cls[s.state]||'s-idle');
-  document.getElementById('jc').textContent=s.total?`${s.completed} / ${s.total}`:'–';
-  document.getElementById('jbar').style.width=(s.total?Math.round(s.completed/s.total*100):0)+'%';
-  // 제어 버튼은 타겟 선택 모달을 열어 여러 레플리카를 지정 → 단일 상태로 잠그지 않음(모달이 대상 유무 판단)
-  // 다량·CONFIG 생성(job) 완료 감지 → 결과 버튼 활성
-  if(genWatching && ['done','idle','cancelled','error'].includes(s.state)){ genWatching=false; finishGenerate(); }
+  const all=repsList(), alive=all.filter(r=>!r._stale);
+  let state='idle', completed=0, total=0;
+  const scopeEl=document.getElementById('jobScope');
+  if(selRep){
+    const r=all.find(x=>x.replica===selRep);
+    if(r){ state=r.job_state||'idle'; completed=r.job_completed||0; total=r.job_total||0; }
+    if(scopeEl) scopeEl.innerHTML='▸ '+selRep.slice(-5).toUpperCase()+' <button class="gal-x" onclick="selReplica(null)">✕</button>';
+  } else {
+    completed=alive.reduce((a,r)=>a+(r.job_completed||0),0);
+    total=alive.reduce((a,r)=>a+(r.job_total||0),0);
+    if(alive.some(r=>r.job_state==='running')) state='running';
+    else if(alive.some(r=>r.job_state==='paused')) state='paused';
+    else if(alive.some(r=>r.job_state==='loading')) state='loading';
+    else if(total>0 && completed>=total) state='done';
+    else state='idle';
+    if(scopeEl) scopeEl.textContent='전체 레플리카 합계';
+  }
+  document.getElementById('jstate').textContent=map[state]||(state||'').toUpperCase();
+  document.getElementById('jstate').className='state-chip '+(cls[state]||'s-idle');
+  document.getElementById('jc').textContent=total?`${completed} / ${total}`:'–';
+  document.getElementById('jbar').style.width=(total?Math.round(completed/total*100):0)+'%';
+}
+// 수동 생성(생성 버튼) 완료 감지 → 결과 버튼 활성. 표시와 분리해 유지.
+function checkGenDone(s){
+  if(genWatching && s && ['done','idle','cancelled','error'].includes(s.state)){ genWatching=false; finishGenerate(); }
 }
 function renderResources(){
   if(!RES)return;const g=RES.gpu||{};const lim=+document.getElementById('limitGen').value||null;
@@ -268,6 +287,7 @@ function renderReplist(){
     r=>selReplica(r.replica));
 }
 function selReplica(id){selRep=id;recentMode=false;document.getElementById('repAll').classList.toggle('on',id===null);
+  renderJob();   // 선택 즉시 Job Status 반영(기존 repStore 데이터로)
   updateGalFilter();poll();}
 function setGalFilter(f,btn){galFilter=f;recentMode=false;[...document.getElementById('galSeg').children].forEach(b=>b.classList.remove('on'));btn.classList.add('on');updateGalFilter();poll();}
 // 갤러리 상단 필터 라벨 + × (레플리카 선택 / 방금 생성)
@@ -333,6 +353,7 @@ function loadImgBox(box, fit){
     img.style.cssText='position:absolute;inset:0;width:100%;height:100%;object-fit:'+fit+';display:block';
     box.appendChild(img); };
   img.onerror=()=>{
+    // 아직 생성 안 된 이미지일 수 있어 재시도 — 재시도에만 캐시버스터(브라우저 캐시 무효화)를 붙인다
     if(Date.now()-t0<LD_FAIL_MS){ setTimeout(()=>{img.src=src+(src.includes('?')?'&':'?')+'_t='+Date.now();},1500); }
     else{ clearTimeout(slow);
       box.innerHTML='<div class="img-fail" onclick="event.stopPropagation();loadImgBox(this.closest(\'.imgph,.imgph-big\'))">'
@@ -340,7 +361,8 @@ function loadImgBox(box, fit){
         +'<div class="img-failsub">이미지를 불러오지 못했습니다. 잠시 후 다시 시도하거나, 네트워크·서비스 상태를 확인해주세요.</div></div>';
     }
   };
-  img.src=src+(src.includes('?')?'&':'?')+'_t='+Date.now();
+  // 첫 로드는 순수 URL → 한 번 받은 이미지는 브라우저 캐시 재사용(스크롤마다 재다운로드 방지)
+  img.src=src;
 }
 // 로딩 점 애니메이션 (.→..→...→ 반복) — 전역 1개 타이머
 setInterval(()=>{const d=['.','..','...'][Math.floor(Date.now()/450)%3];
@@ -659,8 +681,9 @@ async function openReplicaModal(id){
 }
 async function refreshReplicaModal(){
   if(!rdReplica||!document.getElementById('rdModal').classList.contains('on')){clearInterval(rdTimer);rdTimer=null;return;}
-  try{const d=await j('/api/replicas_all');const r=(d.replicas||[]).find(x=>x.replica===rdReplica);
-    if(r)paintReplica(r);}catch(e){}
+  // 카드·요약과 동일한 출처(poll/reloadReplicas가 갱신하는 repStore)에서 읽어 값이 어긋나지 않게 한다
+  const r=repsList().find(x=>x.replica===rdReplica);
+  if(r)paintReplica(r);
   if(rdRange==='live')loadHistory();   // 실시간 범위면 시계열도 갱신
 }
 function limitDashVal(){return +document.getElementById('limitDash').value||null;}
