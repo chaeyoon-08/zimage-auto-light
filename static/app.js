@@ -156,7 +156,8 @@ function openControlModal(action){
 }
 function closeCtrlModal(){ document.getElementById('ctrlModal').classList.remove('on'); ctrlAction=null; }
 function ctrlCandidates(){
-  const ok={pause:['running'],resume:['paused'],cancel:['running','paused']}[ctrlAction]||[];
+  // 설계: 일시중지=동작 중(running) 대상 / 재개·취소=일시중지한 것(paused)만 대상
+  const ok={pause:['running'],resume:['paused'],cancel:['paused']}[ctrlAction]||[];
   return repsList().filter(r=>!r._stale && ok.includes(r.job_state));
 }
 function renderCtrlList(){
@@ -172,36 +173,57 @@ function toggleCtrlAll(){
 }
 async function confirmCtrl(){
   const targets=[...document.querySelectorAll('#ctrlList .ctrl-cb:checked')].map(cb=>cb.value);
-  if(!targets.length){ closeCtrlModal(); return; }
+  if(!targets.length){ alert('대상 레플리카를 먼저 선택해주세요.'); return; }   // 조용히 닫지 않음 — 선택 여부를 명확히
   const action=ctrlAction;
-  try{ await post('/api/control',{targets,action}); }catch(e){}
-  closeCtrlModal(); poll();
+  const r=await post('/api/control',{targets,action});
+  if(!r||!r.ok){ alert('명령 전송에 실패했습니다.'); return; }
+  closeCtrlModal();
+  const label={pause:'일시중지',resume:'재개',cancel:'취소'}[action]||action;
+  toast(`${targets.length}개 레플리카에 '${label}' 명령을 보냈어요. 적용까지 몇 초 걸릴 수 있어요`);
+  poll();
+}
+// 화면 하단 토스트 — 명령처럼 "보냈지만 반영에 시간이 걸리는" 동작의 안내용
+let _toastTimer=null;
+function toast(msg){
+  let t=document.getElementById('toast');
+  if(!t){ t=document.createElement('div'); t.id='toast'; document.body.appendChild(t); }
+  t.textContent=msg; t.classList.add('show');
+  clearTimeout(_toastTimer); _toastTimer=setTimeout(()=>t.classList.remove('show'), 4000);
 }
 
 // ───────── 폴링 ─────────
 let polling=false;
 async function poll(){
-  if(polling) return;          // 이전 poll이 아직 안 끝났으면 건너뜀 (느린 노드에서 요청 쌓임 방지)
+  if(polling) return;          // 이전 poll이 아직 안 끝났으면 건너뜀 (요청 쌓임 방지)
   polling=true;
   try{
     if(!loaded.gal) renderGallery();    // 첫 로드 전(fetch 동안)엔 스피너 표시
     if(!loaded.reps) renderReplist();
-    try{const s=await j('/api/status');checkGenDone(s);}catch(e){}
-    try{RES=await j('/api/resources');renderResources();}catch(e){}
-    try{IMAGES=await j('/api/images?source='+(galFilter==='all'?'':galFilter)+(selRep?('&replica='+encodeURIComponent(selRep)):''));loaded.gal=true;renderGallery();}catch(e){}
-    try{const r=await j('/api/replicas_all');mergeReps(r.replicas);loaded.reps=true;renderReplist();renderJob();}catch(e){}
+    // 4개 요청을 동시에 쏜다(순차 대기 X) → 한 바퀴가 '제일 느린 1개' 시간으로 끝남
+    const imgUrl='/api/images?source='+(galFilter==='all'?'':galFilter)+(selRep?('&replica='+encodeURIComponent(selRep)):'');
+    const [s, res, imgs, reps] = await Promise.all([
+      j('/api/status').catch(()=>null),
+      j('/api/resources').catch(()=>null),
+      j(imgUrl).catch(()=>null),
+      j('/api/replicas_all').catch(()=>null),
+    ]);
+    if(s) checkGenDone(s);
+    if(res){ RES=res; renderResources(); }
+    if(imgs){ IMAGES=imgs; loaded.gal=true; renderGallery(); }
+    if(reps){ mergeReps(reps.replicas); loaded.reps=true; renderReplist(); renderJob(); }
   } finally { polling=false; }
 }
 // Job Status 표시: 레플리카 선택 시 그 레플리카, 선택 안 하면 전체 합계 (응답 1대 랜덤 표시 폐지)
 function renderJob(){
-  const map={running:'RUNNING',paused:'PAUSED',done:'DONE',idle:'IDLE',cancelled:'CANCELLED',error:'ERROR',loading:'LOADING'};
-  const cls={running:'s-running',paused:'s-paused',done:'s-done',idle:'s-idle',cancelled:'s-done',error:'s-error',loading:'s-loading'};
+  const map={running:'RUNNING',paused:'PAUSED',done:'DONE',idle:'IDLE',cancelled:'CANCELLED',error:'ERROR',loading:'LOADING',dead:'DEAD'};
+  const cls={running:'s-running',paused:'s-paused',done:'s-done',idle:'s-idle',cancelled:'s-done',error:'s-error',loading:'s-loading',dead:'s-error'};
   const all=repsList(), alive=all.filter(r=>!r._stale);
   let state='idle', completed=0, total=0;
   const scopeEl=document.getElementById('jobScope');
   if(selRep){
     const r=all.find(x=>x.replica===selRep);
-    if(r){ state=r.job_state||'idle'; completed=r.job_completed||0; total=r.job_total||0; }
+    // 죽은 레플리카는 heartbeat가 멈춰 job_state가 옛 'running'으로 굳어 있으므로 DEAD로 표시
+    if(r){ state = r._stale ? 'dead' : (r.job_state||'idle'); completed=r.job_completed||0; total=r.job_total||0; }
     if(scopeEl) scopeEl.innerHTML='▸ '+selRep.slice(-5).toUpperCase()+' <button class="gal-x" onclick="selReplica(null)">✕</button>';
   } else {
     completed=alive.reduce((a,r)=>a+(r.job_completed||0),0);
@@ -217,13 +239,37 @@ function renderJob(){
   document.getElementById('jstate').className='state-chip '+(cls[state]||'s-idle');
   document.getElementById('jc').textContent=total?`${completed} / ${total}`:'–';
   document.getElementById('jbar').style.width=(total?Math.round(completed/total*100):0)+'%';
+  updateCtrlButtons(all);
+}
+// 버튼 활성화 규칙(설계): 일시중지=동작 중(running) 있을 때만 / 재개·취소=일시중지(paused) 있을 때만.
+// → 처음엔 일시중지만 활성, 일시중지하면 재개·취소가 활성화된다.
+function updateCtrlButtons(all){
+  const live=(all||repsList()).filter(r=>!r._stale);
+  const hasRunning=live.some(r=>r.job_state==='running');
+  const hasPaused =live.some(r=>r.job_state==='paused');
+  const bp=document.getElementById('btnPause'), br=document.getElementById('btnResume'), bc=document.getElementById('btnCancel');
+  if(bp) bp.disabled=!hasRunning;
+  if(br) br.disabled=!hasPaused;
+  if(bc) bc.disabled=!hasPaused;
 }
 // 수동 생성(생성 버튼) 완료 감지 → 결과 버튼 활성. 표시와 분리해 유지.
 function checkGenDone(s){
   if(genWatching && s && ['done','idle','cancelled','error'].includes(s.state)){ genWatching=false; finishGenerate(); }
 }
 function renderResources(){
-  if(!RES)return;const g=RES.gpu||{};const lim=+document.getElementById('limitGen').value||null;
+  const sc=document.getElementById('resScope');
+  if(sc) sc.textContent = selRep ? ('· ▸ '+selRep.slice(-5).toUpperCase()) : '· 응답 레플리카';
+  let g, peak, lastGen, avgS, minS, maxS;
+  if(selRep){                                   // 레플리카 선택 시 그 레플리카 자원(status)으로
+    const r=repsList().find(x=>x.replica===selRep);
+    if(!r) return;
+    g={vram_used_gb:r.vram_used_gb, vram_total_gb:r.vram_total_gb, ram_used_gb:r.ram_used_gb, ram_total_gb:r.ram_total_gb, util:r.util};
+    peak=r.vram_peak_gb; lastGen=r.last_gen_s; avgS=r.avg_gen_s; minS=r.min_gen_s; maxS=r.max_gen_s;
+  } else {                                       // 미선택 시 응답한 레플리카(/api/resources)
+    if(!RES) return;
+    g=RES.gpu||{}; peak=RES.vram_peak_gb; lastGen=RES.last_gen?.seconds; avgS=RES.gen_avg_s; minS=RES.gen_min_s; maxS=RES.gen_max_s;
+  }
+  const lim=+document.getElementById('limitGen').value||null;
   const vover=lim&&g.vram_used_gb!=null&&g.vram_used_gb>lim;
   const vp=g.vram_total_gb?Math.min(100,g.vram_used_gb/g.vram_total_gb*100):0;
   const rp=g.ram_total_gb?Math.min(100,g.ram_used_gb/g.ram_total_gb*100):0;
@@ -231,17 +277,18 @@ function renderResources(){
     <div class="res ${vover?'over':''}"><div class="rk">GPU VRAM</div><div class="rv">${g.vram_used_gb??'–'} <small>/ ${g.vram_total_gb??'–'} GB</small></div><div class="rbar"><i style="width:${vp}%"></i></div></div>
     <div class="res"><div class="rk">System RAM</div><div class="rv">${g.ram_used_gb??'–'} <small>/ ${g.ram_total_gb??'–'} GB</small></div><div class="rbar"><i style="width:${rp}%"></i></div></div>
     <div class="res"><div class="rk">GPU Util</div><div class="rv">${g.util??'–'} <small>%</small></div></div>
-    <div class="res"><div class="rk">VRAM peak</div><div class="rv">${RES.vram_peak_gb??'–'} <small>GB</small></div></div>`);
+    <div class="res"><div class="rk">VRAM peak</div><div class="rv">${peak??'–'} <small>GB</small></div></div>`);
   const f=v=>v==null?'–':v;
   setHTML(document.getElementById('speedGrid'),`
-    <div class="sp"><div class="k">최근 생성</div><div class="v">${f(RES.last_gen?.seconds)}<small>s</small></div></div>
-    <div class="sp"><div class="k">평균</div><div class="v">${f(RES.gen_avg_s)}<small>s</small></div></div>
-    <div class="sp"><div class="k">최단</div><div class="v">${f(RES.gen_min_s)}<small>s</small></div></div>
-    <div class="sp"><div class="k">최장</div><div class="v">${f(RES.gen_max_s)}<small>s</small></div></div>`);
+    <div class="sp"><div class="k">최근 생성</div><div class="v">${f(lastGen)}<small>s</small></div></div>
+    <div class="sp"><div class="k">평균</div><div class="v">${f(avgS)}<small>s</small></div></div>
+    <div class="sp"><div class="k">최단</div><div class="v">${f(minS)}<small>s</small></div></div>
+    <div class="sp"><div class="k">최장</div><div class="v">${f(maxS)}<small>s</small></div></div>`);
 }
 // 상태 → 점 색깔 (#4): 죽음 빨강 / 작업중 초록(기본) / 멈춤 노랑 / 끝남·기타 회색
 function dotClass(r){
   if(r._stale) return 'dead';
+  if(r._slow) return 'slow';
   return {running:'',paused:'paused',done:'done',idle:'done',cancelled:'done',error:'dead',loading:'loading'}[r.job_state]||'';
 }
 // 키 기반 reconcile (#2): 통째로 다시 그리지 않고 있는 건 갱신·없어진 것만 제거 → 깜빡임 방지
@@ -266,12 +313,15 @@ function setHTML(el, html){ if(el && el.__html!==html){ el.innerHTML=html; el.__
 function loadingHTML(msg){ return '<div class="loading-box"><div class="spinner"></div><span>'+msg+'</span></div>'; }
 // 레플리카 누적: 응답에 온 건 갱신·추가하되 절대 제거 안 함 → 한 번 박힌 상자는 안 사라짐.
 function mergeReps(list){ const t=Date.now(); (list||[]).forEach(r=>{ r._seen=t; repStore[r.replica]=r; }); }
-// 화면용 목록: ID순 고정 정렬. 죽음 판정은 서버 _stale 이 주(노하드 대비 120초/로딩 600초).
-// 여기 무소식 임계는 서버가 목록에서 아예 뺐을 때의 백업 — 서버와 동일하게(로딩은 더 길게) 맞춘다.
+// 화면용 목록: ID순 고정 정렬. 판정은 서버 _slow(지연)/_stale(죽음)가 주.
+// 여기 임계는 서버가 목록에서 아예 뺐을 때의 백업 — 서버와 동일(지연 120초 / 죽음 300초 / 로딩 600초).
 function repsList(){ const t=Date.now();
   return Object.values(repStore)
-    .map(r=>{ const limit = (r.job_state==='loading') ? 600000 : 120000;
-              return { ...r, _stale: !!r._stale || (t-(r._seen||0) > limit) }; })
+    .map(r=>{ const ageMs=t-(r._seen||0); const loading=r.job_state==='loading';
+              const deadLim = loading ? 600000 : 300000;
+              const stale = !!r._stale || ageMs > deadLim;
+              const slow  = !stale && ( !!r._slow || (!loading && ageMs > 120000) );
+              return { ...r, _stale: stale, _slow: slow }; })
     .sort((a,b)=>(a.replica||'').localeCompare(b.replica||'')); }
 function renderReplist(){
   if(!loaded.reps){ setHTML(document.getElementById('replist'), loadingHTML('레플리카 불러오는 중')); return; }
@@ -286,10 +336,15 @@ function renderReplist(){
       <span class="meta"><span class="dot ${dotClass(r)}"></span>${r.job_completed||0}/${r.job_total||0} · ${r.util??'–'}%</span>`,
     r=>selReplica(r.replica));
 }
+// 갤러리만 즉시 다시 받아온다 — 전체 poll의 겹침 방지 가드·순차 대기를 건너뛰어,
+// 레플리카/필터 선택이 1~2분 밀리지 않고 바로 반영되게 한다(이미지 목록만 가볍게 fetch)
+async function reloadGallery(){
+  try{IMAGES=await j('/api/images?source='+(galFilter==='all'?'':galFilter)+(selRep?('&replica='+encodeURIComponent(selRep)):''));loaded.gal=true;renderGallery();}catch(e){}
+}
 function selReplica(id){selRep=id;recentMode=false;document.getElementById('repAll').classList.toggle('on',id===null);
-  renderJob();   // 선택 즉시 Job Status 반영(기존 repStore 데이터로)
-  updateGalFilter();poll();}
-function setGalFilter(f,btn){galFilter=f;recentMode=false;[...document.getElementById('galSeg').children].forEach(b=>b.classList.remove('on'));btn.classList.add('on');updateGalFilter();poll();}
+  renderJob(); renderResources();   // 선택 즉시 Job Status·Resources 반영(기존 repStore 데이터로)
+  updateGalFilter();reloadGallery();}
+function setGalFilter(f,btn){galFilter=f;recentMode=false;[...document.getElementById('galSeg').children].forEach(b=>b.classList.remove('on'));btn.classList.add('on');updateGalFilter();reloadGallery();}
 // 갤러리 상단 필터 라벨 + × (레플리카 선택 / 방금 생성)
 function updateGalFilter(){
   const el=document.getElementById('galFilt');
@@ -302,7 +357,7 @@ function updateGalFilter(){
 function clearGalFilter(){
   selRep=null; recentMode=false; recentIds=[];   // × → 레플리카/방금생성 해제 + NEW 배지 제거
   document.getElementById('repAll').classList.add('on');
-  updateGalFilter(); poll();
+  renderJob(); renderResources(); updateGalFilter(); reloadGallery();
 }
 function renderGallery(){
   const el=document.getElementById('gallery');
@@ -361,8 +416,8 @@ function loadImgBox(box, fit){
         +'<div class="img-failsub">이미지를 불러오지 못했습니다. 잠시 후 다시 시도하거나, 네트워크·서비스 상태를 확인해주세요.</div></div>';
     }
   };
-  // 첫 로드는 순수 URL → 한 번 받은 이미지는 브라우저 캐시 재사용(스크롤마다 재다운로드 방지)
-  img.src=src;
+  // 이미지는 캐시 최적화하지 않고 매번 새로 받는다(네트워크 저장소에 막 써지는 중인 파일을 영구 캐시하면 안 뜨는 문제 방지)
+  img.src=src+(src.includes('?')?'&':'?')+'_t='+Date.now();
 }
 // 로딩 점 애니메이션 (.→..→...→ 반복) — 전역 1개 타이머
 setInterval(()=>{const d=['.','..','...'][Math.floor(Date.now()/450)%3];
@@ -516,8 +571,9 @@ async function reloadReplicas(){
 function renderSummary(){
   const reps=repsList();
   const alive=reps.filter(r=>!r._stale);
-  const st={running:0,paused:0,done:0,dead:0};
+  const st={running:0,paused:0,done:0,slow:0,dead:0};
   reps.forEach(r=>{ if(r._stale){st.dead++;return;}
+    if(r._slow){st.slow++;return;}
     if(r.job_state==='running')st.running++;
     else if(r.job_state==='paused')st.paused++;
     else st.done++; });
@@ -538,6 +594,7 @@ function renderSummary(){
         ${stateCell('run','i-play',st.running)}
         ${stateCell('pau','i-pause',st.paused)}
         ${stateCell('don','i-check',st.done)}
+        ${stateCell('slo','i-activity',st.slow)}
         ${stateCell('ded','i-x',st.dead)}
       </div></div>
     <div class="sum"><div class="k">${ic('i-zap')}전체 시간당 생성</div><div class="v">${totTp} <small>장/h</small></div></div>
@@ -575,8 +632,8 @@ function renderCards(){
     r=>{
       const over=lim&&r.vram_used_gb!=null&&r.vram_used_gb>lim;
       const vt=r.vram_total_gb||32;const vp=Math.min(100,(r.vram_used_gb||0)/vt*100);
-      const dead=r._stale;
-      return `<div class="top"><span class="rid">${r.replica}</span><span class="chip ${dead?'c-dead':(cmap[r.job_state]||'c-done')}">${dead?'DEAD':(r.job_state||'').toUpperCase()}</span></div>
+      const dead=r._stale, slow=r._slow;
+      return `<div class="top"><span class="rid">${r.replica}</span><span class="chip ${dead?'c-dead':(slow?'c-slow':(cmap[r.job_state]||'c-done'))}">${dead?'DEAD':(slow?'지연':(r.job_state||'').toUpperCase())}</span></div>
       <div class="rrow"><span class="lbl">GPU VRAM</span><span class="val ${over?'over':''}">${r.vram_used_gb??'–'} <span style="color:var(--text-dim);font-size:11px">/ ${r.vram_total_gb??'–'} GB</span></span></div>
       <div class="rbar2"><i class="${over?'over':''}" style="width:${vp}%"></i></div>
       <div class="rrow"><span class="lbl">GPU Util</span><span class="val">${r.util??'–'} %</span></div>
@@ -597,6 +654,7 @@ function applyLimits(){renderResources();}
 function ageInfo(r){
   const age=r._age_s!=null?Math.round(r._age_s):null;
   if(r._stale) return {cls:'dead',dot:'dead',txt:age!=null?`갱신 안 됨 · 마지막 ${age}초 전`:'갱신 안 됨'};
+  if(r._slow) return {cls:'slow',dot:'slow',txt:age!=null?`응답 지연 · 마지막 ${age}초 전`:'응답 지연'};
   if(['done','cancelled'].includes(r.job_state)) return {cls:'done',dot:'done',txt:'갱신 종료'};
   // 여기부터는 살아있고 안 끝난 상태(paused 포함) → 갱신이 계속 와야 정상
   if(age!=null&&age>=20) return {cls:'warn',dot:'paused',txt:`${age}초 전 갱신`};

@@ -86,9 +86,9 @@ GEN_COUNT = os.getenv("GEN_COUNT", "").strip()
 CONDITIONS_FILE = os.getenv("CONDITIONS_FILE", "").strip()
 RANDOM_PICK = os.getenv("RANDOM_PICK", "false").strip().lower() in ("1", "true", "yes", "y")
 
-STALE_SECONDS = float(os.getenv("STALE_SECONDS", "120"))  # 이 시간 넘게 갱신 없으면 죽은 레플리카로 간주. 노하드(디스크리스) tier3 배려 — status 쓰기가 네트워크로 밀릴 수 있어 넉넉히
-LOAD_STALE_SECONDS = float(os.getenv("LOAD_STALE_SECONDS", "600"))  # 'loading'(모델 로드 중)에만 적용하는 임계. 노하드에선 모델 로드 자체가 네트워크라 오래 걸려 죽음 오판 방지
-REP_CACHE_SEC = float(os.getenv("REP_CACHE_SEC", "1.5"))  # status 폴더 읽기 캐시. 노하드 대비 — UI 폴링마다 폴더 전체를 다시 읽지 않음(이 시간만큼 화면이 살짝 지연될 수 있음)
+STALE_SECONDS = float(os.getenv("STALE_SECONDS", "120"))  # 이 시간 넘게 갱신 없으면 '응답 지연'(노랑, 살아있음). 잠깐 밀린 것 — 죽음 아님
+DEAD_SECONDS = float(os.getenv("DEAD_SECONDS", "300"))    # 이 시간 넘게 갱신 없으면 '죽음'(빨강). 지연을 한참 지나야 죽음으로 판정 → 죽음↔살음 깜빡임 방지
+LOAD_STALE_SECONDS = float(os.getenv("LOAD_STALE_SECONDS", "600"))  # 'loading'(모델 로드 중) 전용 죽음 임계. 노하드에선 모델 로드 자체가 네트워크라 오래 걸림
 HEARTBEAT_SEC = float(os.getenv("HEARTBEAT_SEC", "3"))    # status 갱신 + control 확인 주기(한 사이클로 묶음)
 HISTORY_SEC = float(os.getenv("HISTORY_SEC", "10"))       # 시계열 로우데이터 샘플 주기
 RECENT_KEEP = int(os.getenv("RECENT_KEEP", "180"))        # recent 보관 점수 (10s×180=30분)
@@ -113,15 +113,12 @@ print(f"[ INFO ] CURRENT_DIR(UI)  = {CURRENT_DIR}", flush=True)
 
 # 모델 로딩 동안에도 화면에 즉시 뜨도록, 로드 시작 전 'loading' 상태를 한 번 기록
 try:
-    _ld_target = STATUS_DIR / f"{REPLICA_ID}.json"
-    _ld_tmp = STATUS_DIR / f".{REPLICA_ID}.json.tmp"
-    _ld_tmp.write_text(json.dumps({
+    (STATUS_DIR / f"{REPLICA_ID}.json").write_text(json.dumps({
         "replica": REPLICA_ID,
         "updated": dt.datetime.now().isoformat(timespec="seconds"),
         "started_at": STARTED_AT.isoformat(timespec="seconds"),
         "job_state": "loading", "generated": 0,
     }, ensure_ascii=False), encoding="utf-8")
-    os.replace(_ld_tmp, _ld_target)   # 원자적 — 컨테이너 인식의 첫 신호라 부분쓰기 방지
 except Exception:
     pass
 
@@ -399,18 +396,13 @@ def _status_payload():
 _hb_lock = threading.Lock()
 
 def _write_heartbeat():
-    # 노하드(디스크리스) 대비: 임시 파일에 쓴 뒤 원자적 교체 → 네트워크 끊김으로 인한 부분쓰기/깨진 json 방지.
-    # payload 생성은 lock 밖(가벼움), 파일 교체만 직렬화(heartbeat 스레드 + 생성 워커 동시 쓰기 충돌 방지).
     try:
         payload = json.dumps(_status_payload(), ensure_ascii=False)
     except Exception as e:
         print(f"[ WARN ] 하트비트 payload 실패: {e}", flush=True); return
     try:
         with _hb_lock:
-            target = STATUS_DIR / f"{REPLICA_ID}.json"
-            tmp = STATUS_DIR / f".{REPLICA_ID}.json.tmp"
-            tmp.write_text(payload, encoding="utf-8")
-            os.replace(tmp, target)
+            (STATUS_DIR / f"{REPLICA_ID}.json").write_text(payload, encoding="utf-8")
     except Exception as e:
         print(f"[ WARN ] 하트비트 쓰기 실패: {e}", flush=True)
 
@@ -691,14 +683,8 @@ def list_replicas_all():
     return _replicas(include_stale=True)
 
 
-_rep_cache = {"ts": 0.0, "reps": None}
-
 def _read_status_dir():
-    """status 폴더 전체를 읽어 레플리카 dict 리스트(+_age_s,_stale) 반환.
-    노하드 대비: REP_CACHE_SEC 동안 결과를 캐시해 UI 폴링마다 폴더 전체를 다시 읽지 않는다."""
-    now_m = time.time()
-    if _rep_cache["reps"] is not None and (now_m - _rep_cache["ts"]) < REP_CACHE_SEC:
-        return _rep_cache["reps"]
+    """status 폴더 전체를 읽어 레플리카 dict 리스트(+_age_s,_stale) 반환."""
     now = dt.datetime.now()
     reps = []
     try:
@@ -718,14 +704,17 @@ def _read_status_dir():
             except Exception:
                 pass
             r["_age_s"] = round(age, 1) if age is not None else None
-            # 모델 로드 중('loading')은 노하드에서 오래 걸릴 수 있어 더 관대한 임계 적용
-            limit = LOAD_STALE_SECONDS if r.get("job_state") == "loading" else STALE_SECONDS
-            r["_stale"] = (age is not None and age > limit)
+            # 2단계 판정: 지연(_slow, 노랑·살아있음) → 죽음(_stale, 빨강). loading은 죽음 임계만 넉넉히.
+            if r.get("job_state") == "loading":
+                r["_slow"] = False
+                r["_stale"] = (age is not None and age > LOAD_STALE_SECONDS)
+            else:
+                r["_slow"] = (age is not None and STALE_SECONDS < age <= DEAD_SECONDS)
+                r["_stale"] = (age is not None and age > DEAD_SECONDS)
             reps.append(r)
     except Exception:
         pass
     reps.sort(key=lambda r: r.get("replica", ""))
-    _rep_cache["ts"] = now_m; _rep_cache["reps"] = reps
     return reps
 
 
@@ -739,25 +728,25 @@ def _replicas(include_stale=False):
     paused = [r for r in alive if r.get("job_state") == "paused"]
     done = [r for r in alive if r.get("job_state") in ("done", "idle", "cancelled", "error")]
     utils = [r.get("util") for r in alive if r.get("util") is not None]
+    slow_count = sum(1 for r in reps_all if r.get("_slow"))
     summary = {
         "replicas": len(alive),
         "total_generated": total_gen,
         "running": len(running),
         "avg_util": round(sum(utils) / len(utils)) if utils else None,
         "states": {"running": len(running), "paused": len(paused),
-                   "done": len(done), "dead": dead_count},
+                   "done": len(done), "slow": slow_count, "dead": dead_count},
     }
-    return {"run_id": RUN_ID, "summary": summary, "replicas": reps, "stale_seconds": STALE_SECONDS}
+    return {"run_id": RUN_ID, "summary": summary, "replicas": reps,
+            "stale_seconds": STALE_SECONDS, "dead_seconds": DEAD_SECONDS}
 
 
-_img_meta_cache = {}   # path(str) -> meta(dict, _mtime 포함). 메타 json은 생성 시 1회 기록 후 불변 → 한 번 읽으면 재사용
 
 @app.get("/api/images")
 def list_images(replica: str = None, source: str = None, scope: str = "run", limit: int = 1000):
     """메타 json 스캔 → 이미지 목록(최근순).
     scope='run'(기본): 이번 실행(CURRENT_DIR)만. scope='all': 저장소의 모든 실행(run_* 전체 폴더) 집계.
-    replica 필터(파드 이름), source 필터(auto|manual) 옵션.
-    노하드 대비: 폴더 목록만 새로 훑고, 이미 읽은 메타는 캐시에서 재사용(매번 전체 재읽기 방지)."""
+    replica 필터(파드 이름), source 필터(auto|manual) 옵션."""
     if scope == "all":
         runs_root = CURRENT_DIR.parent   # /workspace/current
         dirs = sorted((d for d in runs_root.glob("run_*") if d.is_dir())) if runs_root.exists() else []
@@ -767,16 +756,12 @@ def list_images(replica: str = None, source: str = None, scope: str = "run", lim
     for d in dirs:
         try:
             for p in d.glob("*.json"):
-                key = str(p)
-                m = _img_meta_cache.get(key)
-                if m is None:                      # 캐시에 없을 때만 디스크 읽기(= 새로 생긴 메타)
-                    try:
-                        mt = p.stat().st_mtime
-                        m = json.loads(p.read_text(encoding="utf-8"))
-                    except Exception:
-                        continue
-                    m["_mtime"] = mt
-                    _img_meta_cache[key] = m
+                try:
+                    mt = p.stat().st_mtime
+                    m = json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                m["_mtime"] = mt
                 iid = m.get("id") or p.stem
                 prev = seen.get(iid)
                 if prev and prev.get("_mtime", 0) >= m.get("_mtime", 0):
@@ -802,9 +787,10 @@ def image_file(image_id: str):
     for d in (OUTPUT_AUTO_DIR, OUTPUT_MANUAL_DIR, OUTPUT_DIR / "ui", OUTPUT_DIR):
         path = d / f"{image_id}.png"
         if path.exists():
-            # 이미지 id는 고유·불변 → 브라우저가 장기 캐시하도록(한 번 받으면 재다운로드 안 함)
+            # 이미지는 캐시하지 않는다(no-store): 네트워크 저장소에 막 써지는 중인 파일을
+            # 브라우저가 영구 캐시하면 이후 완성본이 와도 안 뜨는 문제가 생김
             return FileResponse(path, media_type="image/png",
-                                headers={"Cache-Control": "public, max-age=31536000, immutable"})
+                                headers={"Cache-Control": "no-store"})
     raise HTTPException(404, "파일이 없습니다.")
 
 

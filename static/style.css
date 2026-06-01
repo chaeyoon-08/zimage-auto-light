@@ -184,6 +184,7 @@ input[type=number]{-moz-appearance:textfield;}
 .st-pill.pau .ico{color:#ffd580;}
 .st-pill.don .ico{color:var(--text-dim);}
 .st-pill.ded .ico{color:var(--danger);} .st-pill.ded{border-color:rgba(248,113,113,.25);}
+.st-pill.slo .ico{color:#ffa94d;} .st-pill.slo{border-color:rgba(255,169,77,.3);}
 .toolbar{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex:none;}
 .toolbar h2{font-family:'Orbitron',sans-serif;font-size:13px;color:var(--purple-label);text-transform:uppercase;letter-spacing:.06em;}
 .count-note{font-size:12px;color:var(--text-dim);}
@@ -440,3 +441,20 @@ input[type=number]{-moz-appearance:textfield;}
   .d-toc-h{width:100%;margin:0 0 4px 4px;}
   .d-row{grid-template-columns:1fr;}
 }
+
+/* 제어 모달(일시중지·재개·취소)은 토글이 아니라 체크박스 모양 */
+.ctrl-item .switch,.ctrl-all .switch{width:18px;height:18px;border-radius:5px;background:rgba(255,255,255,.06);border:1px solid var(--line);}
+.ctrl-item .switch::after,.ctrl-all .switch::after{content:'';position:absolute;top:2px;left:6px;width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;border-radius:0;background:none;transform:rotate(45deg);opacity:0;transition:.12s;}
+.ctrl-item input:checked+.switch,.ctrl-all input:checked+.switch{background:var(--purple);border-color:var(--purple);}
+.ctrl-item input:checked+.switch::after,.ctrl-all input:checked+.switch::after{opacity:1;left:6px;background:none;}
+
+/* 응답 지연(_slow): 죽음(빨강) 직전 단계 — 주황(멈춤 노랑과 구분) */
+.dot.slow{background:#ffa94d;}
+.c-slow{color:#ffa94d;border-color:rgba(255,169,77,.4);}
+.slow{color:#ffa94d;}
+
+/* JOB STATUS 제어 버튼 비활성(설계: 일시중지→재개·취소 순서) */
+#btnPause:disabled,#btnResume:disabled,#btnCancel:disabled{opacity:.3;cursor:not-allowed;pointer-events:none;}
+/* 토스트 — 명령처럼 반영에 시간이 걸리는 동작 안내 */
+#toast{position:fixed;left:50%;bottom:30px;transform:translateX(-50%) translateY(12px);background:rgba(36,26,56,.97);border:1px solid rgba(180,122,255,.5);color:#f0eaff;padding:11px 18px;border-radius:11px;font-size:13px;line-height:1.4;opacity:0;pointer-events:none;transition:.28s;z-index:9999;box-shadow:0 10px 34px rgba(0,0,0,.45);max-width:88vw;text-align:center;}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0);}

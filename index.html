@@ -129,7 +129,7 @@
         <div class="gallery-scroll"><div class="gallery" id="gallery"></div></div>
       </div>
       <div class="panel" id="resPanel">
-        <div class="ph"><h2>Resources <span style="font-family:Pretendard;font-size:11px;color:var(--text-dim);text-transform:none;letter-spacing:0;">· 현재 응답 레플리카</span></h2>
+        <div class="ph"><h2>Resources <span id="resScope" style="font-family:Pretendard;font-size:11px;color:var(--text-dim);text-transform:none;letter-spacing:0;">· 응답 레플리카</span></h2>
           <div class="limit-box" style="margin-left:auto"><span>VRAM limit</span><input type="number" placeholder="–" id="limitGen" oninput="applyLimits()"><span>GB</span></div></div>
         <div class="res-grid" id="resGrid"></div>
         <div style="font-size:10px;text-transform:uppercase;color:var(--text-muted);letter-spacing:.05em;margin-bottom:8px;">이미지 1장 생성 시간</div>
@@ -332,8 +332,8 @@
           </div>
           <div><ul class="d-feat">
             <li>진행 수(완료/전체)·상태 배지·진행바를 보여줍니다. 기본은 <b>전체 레플리카 합계</b>이고, ③ 목록에서 레플리카를 고르면 <b>그 레플리카만</b>의 진행으로 바뀌어요. 제목 밑 라벨 옆 <b>✕</b>로 다시 전체로 돌아갑니다.</li>
-            <li><b>일시정지·재개·취소</b> 버튼을 누르면 <b>대상 레플리카를 고르는 창</b>이 떠요. 체크박스로 원하는 레플리카(또는 전체 선택)를 골라 적용합니다 — 일시정지는 <b>동작 중</b>, 재개는 <b>멈춘 것</b>, 취소는 <b>동작 중·멈춘 것</b>이 대상이에요.</li>
-            <li><span class="k">진행 중인 작업이 있으면 그 레플리카는 새로 생성되지 않습니다.</span> 그 레플리카를 골라 <b>취소</b>로 정리한 뒤 생성하세요. (정리 안 하고 생성을 누르면 "일시중지 후 취소하신 다음 다시 진행해주세요" 안내가 떠요.)</li>
+            <li><b>일시정지·재개·취소</b> 버튼을 누르면 <b>대상 레플리카를 고르는 창</b>이 떠요. 체크박스로 원하는 레플리카(또는 전체 선택)를 골라 적용합니다 — <b>일시정지</b>는 동작 중(running)인 것, <b>재개·취소</b>는 <b>일시정지한 것(paused)만</b> 대상이에요. 그래서 처음엔 일시정지 버튼만 활성화되고, <b>일시정지를 해야</b> 재개·취소 버튼이 활성화됩니다(취소하려면 먼저 일시정지).</li>
+            <li><span class="k">진행 중인 작업이 있으면 그 레플리카는 새로 생성되지 않습니다.</span> 그 레플리카를 <b>일시정지한 뒤 취소</b>로 정리하고 생성하세요. (정리 안 하고 생성을 누르면 "일시중지 후 취소하신 다음 다시 진행해주세요" 안내가 떠요.)</li>
             <li>파드(레플리카) 자체를 없애는 건 불가합니다 — gcube가 지정 개수를 유지하려 되살리기 때문에, <b>작업 취소</b>까지가 가능 범위예요.</li>
           </ul></div>
         </div>
@@ -396,7 +396,7 @@
           </ul></div>
         </div>
 
-        <div class="d-sub-h">⑤ Resources · 현재 응답 레플리카</div>
+        <div class="d-sub-h">⑤ Resources · 선택/응답 레플리카</div>
         <div class="d-row">
           <div class="d-mock">
             <svg viewBox="0 0 300 150" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard,sans-serif">
@@ -442,7 +442,7 @@
             </div>
             <div>
               <ul class="d-feat">
-                <li><b>요약 카드 6개</b> — 레플리카 수 · 총 생성 이미지 · <b>상태 분포</b>(실행/멈춤/완료/죽음) · 전체 시간당 생성 · 평균 가동률 · 평균 GPU Util.</li>
+                <li><b>요약 카드 6개</b> — 레플리카 수 · 총 생성 이미지 · <b>상태 분포</b>(실행/멈춤/완료/지연/죽음) · 전체 시간당 생성 · 평균 가동률 · 평균 GPU Util.</li>
                 <li><b>레플리카 카드</b> — GPU별 VRAM·Util·진행률. 이름으로 검색.</li>
                 <li><span class="k">검색 조건</span> — 상태(ALL·RUNNING·DONE·PAUSED), 정렬(이름순·생성 많은순·VRAM 높은순·Util 높은순), <b>VRAM limit 초과만</b>, <b>죽은 레플리카 포함</b>.</li>
                 <li><span class="k">VRAM limit</span> — 한계치(GB)를 넣으면 초과한 카드의 VRAM이 <b>빨갛게</b> 표시되고, '초과만' 조건으로 그 카드만 모아 볼 수 있어요.</li>
@@ -633,9 +633,10 @@
               <div class="d-states">
                 <div class="d-st"><span class="d-dot" style="background:#8cffb0"></span><b>실행</b><span>생성하는 중 · 정상 갱신</span></div>
                 <div class="d-st"><span class="d-dot" style="background:#B47AFF"></span><b>로딩</b><span>모델 불러오는 중(노하드는 더 걸림)</span></div>
-                <div class="d-st"><span class="d-dot" style="background:#ffd479"></span><b>멈춤 / 지연</b><span>일시정지거나 갱신이 늦음</span></div>
+                <div class="d-st"><span class="d-dot" style="background:#ffd479"></span><b>멈춤</b><span>일시정지한 상태</span></div>
+                <div class="d-st"><span class="d-dot" style="background:#ffa94d"></span><b>지연</b><span>갱신이 잠깐 늦음 · 살아있음(곧 회복)</span></div>
                 <div class="d-st"><span class="d-dot" style="background:#8a86a0"></span><b>완료</b><span>할당량을 다 채움</span></div>
-                <div class="d-st"><span class="d-dot" style="background:#ff7a8c"></span><b>죽음</b><span>한동안 응답이 없음</span></div>
+                <div class="d-st"><span class="d-dot" style="background:#ff7a8c"></span><b>죽음</b><span>오래(기본 5분) 응답이 없음</span></div>
               </div>
               <div class="d-where"><span><b>대시보드</b> 탭 레플리카 카드·요약 분포 · <b>레플리카 상세 모달</b> 헤더(상태 칩·갱신 시각)</span></div>
             </div>
@@ -647,11 +648,11 @@
           <div class="d-faq">
             <details open><summary>생성 버튼이 안 눌려요 (회색이에요)</summary><div class="a">두 경우예요. ① <b>생성이 진행 중</b>이면 끝날 때까지 버튼이 잠깁니다('생성 중...'). ② <b>이전 작업이 남아 있으면</b> 새로 생성되지 않아요. Job Status의 <b>취소</b>에서 그 레플리카를 골라 정리한 뒤 다시 누르세요.</div></details>
             <details><summary>CONFIG를 켰더니 프롬프트가 안 들어가요</summary><div class="a">정상입니다. <b>CONFIG 토글이 ON이면</b> 조건 파일에서 프롬프트를 뽑아 랜덤 생성하므로, 직접 입력한 PROMPT는 비활성화돼 무시돼요. 내가 쓴 프롬프트로 만들려면 토글을 <b>OFF</b>로 두세요.</div></details>
-            <details><summary>'현재 응답 레플리카'가 뭐예요? Resources가 들쭉날쭉해요</summary><div class="a">서비스 URL 하나가 여러 레플리카로 <b>나뉘어 라우팅</b>되기 때문에, 생성 탭의 Resources는 <b>이번에 응답한 그 레플리카</b>의 자원입니다. 특정 레플리카를 고정해서 보려면 대시보드/레플리카 목록에서 그 레플리카를 골라 상세 모달로 보세요.</div></details>
+            <details><summary>Resources가 들쭉날쭉해요</summary><div class="a">레플리카를 <b>고르지 않으면</b> 서비스 URL이 여러 레플리카로 <b>나뉘어 라우팅</b>되기 때문에, Resources가 <b>그때그때 응답한 레플리카</b>의 자원이라 값이 바뀝니다. ③ 레플리카 목록에서 <b>특정 레플리카를 고르면</b> Resources(와 Job Status·갤러리)가 <b>그 레플리카로 고정</b>돼요 — 제목 옆 라벨로 어느 기준인지 확인할 수 있습니다.</div></details>
             <details><summary>AUTO 이미지와 MANUAL 이미지는 뭐가 달라요?</summary><div class="a"><b>AUTO</b>는 워크로드가 자동 생성 설정(조건 파일)으로 백그라운드에서 만든 것, <b>MANUAL</b>은 생성 탭에서 내가 직접 테스트로 만든 것입니다. 갤러리·이미지 탭에서 ALL·AUTO·MANUAL로 걸러 볼 수 있어요.</div></details>
             <details><summary>'이번 실행'과 '전체'는 뭐가 달라요?</summary><div class="a"><b>이번 실행</b>은 지금 떠 있는 배포(실행)가 만든 이미지만, <b>전체</b>는 클라우드 저장소에 쌓인 <b>이전 실행까지 모든</b> 이미지를 봅니다. (이미지 탭 상단 토글)</div></details>
             <details><summary>이미지 상세에서 경로가 두 개로 보여요</summary><div class="a">같은 파일을 두 가지로 보여주는 거예요. <b>컨테이너 경로</b>(<span style="font-family:monospace">/outputs/…</span>)는 워크로드 안에서 보이는 경로, <b>클라우드 경로</b>(<span style="font-family:monospace">Z-Image_Outputs/…</span>)는 마운트된 클라우드 저장소에서의 이름입니다.</div></details>
-            <details><summary>레플리카가 '죽음'으로 떠요</summary><div class="a">일정 시간(기본 120초) 동안 상태 갱신이 없으면 죽은 것으로 표시해요. tier와 무관하게 <b>어떤 이유로든 갱신이 끊긴 레플리카</b>(노드 빠짐·크래시·네트워크 끊김 등)를 가리켜요. <b>사양이 낮은 노드</b>는 한 장 만드는 데 오래 걸려 일시적으로 그럴 수 있어요. 대시보드의 '죽은 레플리카 포함'으로 확인할 수 있어요.</div></details>
+            <details><summary>레플리카가 '지연' 또는 '죽음'으로 떠요</summary><div class="a">상태 갱신이 <b>잠깐(기본 120초)</b> 끊기면 먼저 <b style="color:#ffa94d">지연(주황)</b>으로 표시돼요 — 아직 살아있고 곧 회복될 수 있다는 뜻이라, 죽음으로 깜빡이지 않아요. 갱신이 <b>오래(기본 5분)</b> 끊겨야 비로소 <b style="color:#ff7a8c">죽음(빨강)</b>으로 바뀝니다. 죽음은 노드 빠짐·크래시·네트워크 끊김 등 <b>갱신이 완전히 멈춘</b> 경우예요. 사양이 낮은 노드가 잠깐 느린 정도는 지연 단계에서 머물다 회복됩니다. 대시보드의 '죽은 레플리카 포함'으로 확인할 수 있어요.</div></details>
             <details><summary>모르는 레플리카가 '죽음'으로 먼저 떠 있어요</summary><div class="a">정상입니다. GPU 노드는 <b>붙었다가 반납되고 다른 노드로 교체</b>될 수 있어요. 이때 반납된 옛 노드의 기록이 잠시 <b>죽음(빨강)</b>으로 남아 있을 수 있습니다. 새로 붙은 노드는 <b>모델을 먼저 불러온 뒤</b>(보라 LOADING) 잠깐 있다가 RUNNING으로 뜨기 때문에, 처음엔 죽은 항목만 보이다가 곧 살아있는 레플리카가 나타나요. 죽은 항목이 거슬리면 대시보드의 '죽은 레플리카 포함' 토글로 숨길 수 있습니다.</div></details>
             <details><summary>VRAM limit은 뭘 막아주나요?</summary><div class="a">막아주는 건 아니고 <b>표시</b>해 줍니다. 원하는 사양(GB)을 넣어두면 그보다 많이 쓰는 GPU를 빨갛게/필터로 알려줘서, 자원을 과하게 쓰는 경우를 빨리 찾을 수 있어요.</div></details>
             <details><summary>이미지가 안 떠요</summary><div class="a">잠시 후 <b>자동으로 다시 시도</b>하고, 계속 안 되면 '다시 불러오기' 버튼이 나타납니다.</div></details>
@@ -764,6 +765,7 @@
     <div class="ctrl-search"><svg class="ico"><use href="#i-search"/></svg><input id="ctrlSearch" placeholder="레플리카 ID 검색..." oninput="renderCtrlList()"></div>
     <label class="ctrl-all"><input type="checkbox" id="ctrlAll" onchange="toggleCtrlAll()"><span class="switch"></span> 전체 선택</label>
     <div class="ctrl-list" id="ctrlList"></div>
+    <div style="font-size:11px;color:var(--text-dim);margin:9px 2px 2px;line-height:1.45">※ 확인을 누르면 명령이 전달돼요. 각 레플리카에 <b style="color:var(--text-2)">실제 적용되기까지 몇 초</b> 걸릴 수 있으니, 바로 안 멈춰도 잠시 기다려 주세요.</div>
     <div class="ctrl-foot">
       <button class="ctrl-cancel" onclick="closeCtrlModal()">취소</button>
       <button class="ctrl-ok" id="ctrlConfirm" onclick="confirmCtrl()">확인</button>
