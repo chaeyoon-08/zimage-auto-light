@@ -385,7 +385,7 @@ function reconcileThumbs(el, list, isNewFn){
       node=document.createElement('div'); node.className='thumb'; node.dataset.id=m.id;
       node.onclick=()=>openImgObj(m);
       const isNew=!!(isNewFn&&isNewFn(m));
-      node.innerHTML=`${isNew?'<span class="new-badge">NEW</span>':''}<div class="imgph" data-src="/api/images/${encodeURIComponent(m.id)}/file"></div><div class="cap"><span class="src">${(m.replica||'').slice(-5).toUpperCase()}</span><span class="mtag">${(m.png_sub||m.source||'').toUpperCase()}</span></div>`;
+      node.innerHTML=`${isNew?'<span class="new-badge">NEW</span>':''}<div class="imgph" data-src="/api/images/${encodeURIComponent(m.id)}/thumb"></div><div class="cap"><span class="src">${(m.replica||'').slice(-5).toUpperCase()}</span><span class="mtag">${(m.png_sub||m.source||'').toUpperCase()}</span></div>`;
       loadImgBox(node.querySelector('.imgph'));   // 새로 만든 박스만 로드
     }
     const cur=el.children[idx];
@@ -416,8 +416,8 @@ function loadImgBox(box, fit){
         +'<div class="img-failsub">이미지를 불러오지 못했습니다. 잠시 후 다시 시도하거나, 네트워크·서비스 상태를 확인해주세요.</div></div>';
     }
   };
-  // 이미지는 캐시 최적화하지 않고 매번 새로 받는다(네트워크 저장소에 막 써지는 중인 파일을 영구 캐시하면 안 뜨는 문제 방지)
-  img.src=src+(src.includes('?')?'&':'?')+'_t='+Date.now();
+  // 썸네일(/thumb)은 immutable이라 캐시를 살려 두 번째부터 즉시 뜬다. 원본(/file)은 no-store라 어차피 매번 받음.
+  img.src=src;
 }
 // 로딩 점 애니메이션 (.→..→...→ 반복) — 전역 1개 타이머
 setInterval(()=>{const d=['.','..','...'][Math.floor(Date.now()/450)%3];
@@ -633,7 +633,7 @@ function renderCards(){
       const over=lim&&r.vram_used_gb!=null&&r.vram_used_gb>lim;
       const vt=r.vram_total_gb||32;const vp=Math.min(100,(r.vram_used_gb||0)/vt*100);
       const dead=r._stale, slow=r._slow;
-      return `<div class="top"><span class="rid">${r.replica}</span><span class="chip ${dead?'c-dead':(slow?'c-slow':(cmap[r.job_state]||'c-done'))}">${dead?'DEAD':(slow?'지연':(r.job_state||'').toUpperCase())}</span></div>
+      return `<div class="top"><span class="rid">${r.replica}</span><span class="chip ${dead?'c-dead':(slow?'c-slow':(cmap[r.job_state]||'c-done'))}">${dead?'DEAD':(slow?'SLOW':(r.job_state||'').toUpperCase())}</span></div>
       <div class="rrow"><span class="lbl">GPU VRAM</span><span class="val ${over?'over':''}">${r.vram_used_gb??'–'} <span style="color:var(--text-dim);font-size:11px">/ ${r.vram_total_gb??'–'} GB</span></span></div>
       <div class="rbar2"><i class="${over?'over':''}" style="width:${vp}%"></i></div>
       <div class="rrow"><span class="lbl">GPU Util</span><span class="val">${r.util??'–'} %</span></div>

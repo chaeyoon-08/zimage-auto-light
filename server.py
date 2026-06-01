@@ -225,6 +225,15 @@ def _run_generation(prompt, width, height, steps, guidance, seed, source, config
     png_dir = OUTPUT_MANUAL_DIR if sub == "manual" else OUTPUT_AUTO_DIR
     png_path = png_dir / f"{stem}.png"
     image.save(png_path, format="PNG")
+    # 갤러리용 썸네일(작게·png) — 원본의 1/10 이하 크기. 실패해도 원본은 이미 저장됨.
+    try:
+        thumb_dir = png_dir / "thumbs"
+        thumb_dir.mkdir(exist_ok=True)
+        th = image.copy()
+        th.thumbnail((320, 320))
+        th.save(thumb_dir / f"{stem}.png", format="PNG", optimize=True)
+    except Exception as e:
+        print(f"[WARN] 썸네일 저장 실패({stem}): {e}", flush=True)
     try:
         size_bytes = png_path.stat().st_size
     except Exception:
@@ -535,6 +544,9 @@ def _startup():
     threading.Thread(target=_heartbeat_loop, daemon=True).start()
     threading.Thread(target=_history_loop, daemon=True).start()
     _write_heartbeat()
+    # 스냅샷은 백그라운드 스레드가 채운다(startup을 붙잡지 않도록 동기 호출 안 함).
+    # 첫 바퀴(최대 SNAPSHOT_SEC 초) 전에는 목록이 잠깐 비어 보일 수 있으나 곧 채워진다.
+    threading.Thread(target=_aggregate_loop, daemon=True).start()
     if GEN_COUNT and CONDITIONS_FILE:
         try:
             conds = _load_conditions_file(CONDITIONS_FILE)
@@ -719,7 +731,8 @@ def _read_status_dir():
 
 
 def _replicas(include_stale=False):
-    reps_all = _read_status_dir()
+    with _snap_lock:
+        reps_all = list(_replicas_snap)   # 백그라운드가 갱신한 메모리 스냅샷(파일 I/O 없음)
     dead_count = sum(1 for r in reps_all if r.get("_stale"))
     reps = reps_all if include_stale else [r for r in reps_all if not r.get("_stale")]
     alive = [r for r in reps_all if not r.get("_stale")]
@@ -742,39 +755,76 @@ def _replicas(include_stale=False):
 
 
 
-@app.get("/api/images")
-def list_images(replica: str = None, source: str = None, scope: str = "run", limit: int = 1000):
-    """메타 json 스캔 → 이미지 목록(최근순).
-    scope='run'(기본): 이번 실행(CURRENT_DIR)만. scope='all': 저장소의 모든 실행(run_* 전체 폴더) 집계.
-    replica 필터(파드 이름), source 필터(auto|manual) 옵션."""
-    if scope == "all":
-        runs_root = CURRENT_DIR.parent   # /workspace/current
-        dirs = sorted((d for d in runs_root.glob("run_*") if d.is_dir())) if runs_root.exists() else []
-    else:
-        dirs = [CURRENT_DIR]
-    seen = {}   # id -> meta : 같은 id면 최신 것만 (실행 간 중복 방지)
+_img_cache = {}   # path(str) -> meta(dict). 메타는 불변 → 한 번 읽으면 재사용
+_snap_lock = threading.Lock()
+_replicas_snap = []   # 백그라운드가 채우는 전체 레플리카 스냅샷(_read_status_dir 결과)
+_images_snap = []     # 백그라운드가 채우는 최근 이미지 메타(최근순, 전체 레플리카)
+SNAPSHOT_SEC = float(os.getenv("SNAPSHOT_SEC", "2"))   # 백그라운드 집계 주기(초)
+
+def _img_ts_key(p):
+    parts = p.stem.split("_")          # stem = replica_시각_seq_seed
+    return (parts[-3] + parts[-2]) if len(parts) >= 3 else p.stem
+
+def _collect_images(dirs, cap):
+    """dirs의 이미지 메타를 최근순으로 cap개까지. 새 파일만 read(_img_cache 재사용). stat 없음."""
+    cand = []
     for d in dirs:
         try:
             for p in d.glob("*.json"):
-                try:
-                    mt = p.stat().st_mtime
-                    m = json.loads(p.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
-                m["_mtime"] = mt
-                iid = m.get("id") or p.stem
-                prev = seen.get(iid)
-                if prev and prev.get("_mtime", 0) >= m.get("_mtime", 0):
-                    continue
-                seen[iid] = m
+                cand.append(p)
         except Exception:
             continue
-    metas = list(seen.values())
+    cand.sort(key=_img_ts_key, reverse=True)
+    cand = cand[:cap]
+    seen = {}
+    for p in cand:
+        key = str(p)
+        m = _img_cache.get(key)
+        if m is None:
+            try:
+                m = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            _img_cache[key] = m
+        iid = m.get("id") or p.stem
+        if iid not in seen:
+            seen[iid] = m
+    return list(seen.values())
+
+def _refresh_snapshot():
+    """공유 폴더를 한 번 읽어 메모리 스냅샷 갱신."""
+    global _replicas_snap, _images_snap
+    reps = _read_status_dir()
+    imgs = _collect_images([CURRENT_DIR], 3000)
+    with _snap_lock:
+        _replicas_snap = reps
+        _images_snap = imgs
+
+def _aggregate_loop():
+    """Refresh-Ahead: 주기적으로 공유 폴더를 읽어 메모리 스냅샷을 미리 갱신한다.
+    파일을 읽는 건 이 스레드 하나뿐 — API 요청들은 메모리 스냅샷만 즉시 반환(파일 I/O 0)."""
+    while True:
+        try:
+            _refresh_snapshot()
+        except Exception as e:
+            print(f"[WARN] aggregate_loop: {e}", flush=True)
+        time.sleep(SNAPSHOT_SEC)
+
+@app.get("/api/images")
+def list_images(replica: str = None, source: str = None, scope: str = "run", limit: int = 1000):
+    """이미지 목록(최근순). 기본(run)은 백그라운드 스냅샷을 메모리에서 즉시 반환(파일 I/O 없음).
+    scope=all(드문 경우)만 모든 실행 폴더를 그 자리에서 직접 읽는다."""
+    if scope == "all":
+        runs_root = CURRENT_DIR.parent
+        dirs = sorted((d for d in runs_root.glob("run_*") if d.is_dir())) if runs_root.exists() else []
+        metas = _collect_images(dirs, (limit or 1000) * 3)
+    else:
+        with _snap_lock:
+            metas = list(_images_snap)   # 메모리 스냅샷(이미 최근순)
     if replica:
         metas = [m for m in metas if m.get("replica") == replica]
     if source:
         metas = [m for m in metas if (m.get("png_sub") or m.get("source")) == source]
-    metas.sort(key=lambda m: m.get("_mtime", 0), reverse=True)
     if limit and len(metas) > limit:
         metas = metas[:limit]
     return metas
@@ -791,6 +841,32 @@ def image_file(image_id: str):
             # 브라우저가 영구 캐시하면 이후 완성본이 와도 안 뜨는 문제가 생김
             return FileResponse(path, media_type="image/png",
                                 headers={"Cache-Control": "no-store"})
+    raise HTTPException(404, "파일이 없습니다.")
+
+
+@app.get("/api/images/{image_id}/thumb")
+def image_thumb(image_id: str):
+    """갤러리용 썸네일(png, 작음). 있으면 그대로, 없으면(기존 이미지) 원본에서 1회 만들어 저장 후 서빙.
+    썸네일은 한 번 만들어지면 안 바뀌므로 영구 캐시(immutable) — 갤러리 로딩을 크게 줄인다."""
+    HDR = {"Cache-Control": "public, max-age=31536000, immutable"}
+    # 1) 이미 만들어진 썸네일
+    for d in (OUTPUT_AUTO_DIR, OUTPUT_MANUAL_DIR):
+        tp = d / "thumbs" / f"{image_id}.png"
+        if tp.exists():
+            return FileResponse(tp, media_type="image/png", headers=HDR)
+    # 2) 없으면 원본에서 1회 생성(기존 이미지 대응)
+    for d in (OUTPUT_AUTO_DIR, OUTPUT_MANUAL_DIR, OUTPUT_DIR / "ui", OUTPUT_DIR):
+        op = d / f"{image_id}.png"
+        if op.exists():
+            try:
+                tdir = d / "thumbs"; tdir.mkdir(exist_ok=True)
+                tp = tdir / f"{image_id}.png"
+                im = Image.open(op); im.thumbnail((320, 320))
+                im.save(tp, format="PNG", optimize=True)
+                return FileResponse(tp, media_type="image/png", headers=HDR)
+            except Exception:
+                # 썸네일 생성 실패 시 원본으로 폴백(느리지만 보이긴 함)
+                return FileResponse(op, media_type="image/png", headers={"Cache-Control": "no-store"})
     raise HTTPException(404, "파일이 없습니다.")
 
 
