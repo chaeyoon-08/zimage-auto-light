@@ -37,14 +37,12 @@ flowchart LR
     R2["컨테이너 2"]
     RN["컨테이너 N"]
   end
-  REP -->|"상태·메타 기록 (3초마다)"| WS[("/workspace<br/>공유 저장소")]
-  REP -->|"원본 PNG"| OUT[("/outputs<br/>공유 저장소")]
-  WS -->|"폴링"| UI["웹 UI<br/>대시보드"]
-  OUT -->|"이미지"| UI
+  REP -->|"상태·메타 기록 (3초마다)"| WS[("/workspace<br/>공유 저장소<br/>(밑에 outputs/ 포함)")]
+  WS -->|"폴링·이미지"| UI["웹 UI<br/>대시보드"]
 ```
 
 - 각 레플리카는 기동 시 모델을 GPU에 로드한 뒤, `conditions.json`을 순회하며 이미지를 생성
-- 원본 PNG는 `/outputs`, 메타 json은 `/workspace`에 기록 (용량 중복 방지)
+- 원본 PNG는 `/workspace/outputs`, 메타 json은 `/workspace/current`에 기록 (용량 중복 방지)
 - 3초마다 heartbeat로 자기 상태(자원·진행·GPU 응답)를 `/workspace`에 갱신
 - 웹 UI는 `/workspace`를 폴링해 전체 레플리카를 집계·표시
 - 상태는 **실행 / 멈춤 / 지연 / 완료 / 죽음** 으로 구분
@@ -53,14 +51,14 @@ flowchart LR
 ## 클라우드 저장소 마운트 (필수)
 
 - 레플리카가 여러 대여도 한 화면에서 모니터링되려면, **모든 레플리카가 같은 공유 저장소를 마운트**해야 함
-- gcube 워크로드 설정에서 클라우드 저장소를 아래 두 경로에 마운트
+- gcube 워크로드 설정에서 클라우드 저장소를 `/workspace` **한 곳**에 마운트 (생성된 PNG는 그 밑 `outputs/` 폴더에 쌓임)
 
 | 마운트 경로 | 용도 |
 |---|---|
-| `/workspace` | 상태·메타·시계열 (UI가 읽는 곳) |
-| `/outputs` | 생성된 원본 PNG (아카이브) |
+| `/workspace` | 상태·메타·시계열 + 원본 PNG(`outputs/auto`, `outputs/manual`). UI가 읽는 곳 |
 
-- 두 경로를 마운트하지 않으면 레플리카 간 상태가 공유되지 않아 모니터링이 동작하지 않음
+- 이 경로를 마운트하지 않으면 레플리카 간 상태가 공유되지 않아 모니터링이 동작하지 않음
+- 생성된 이미지는 저장소의 `outputs/auto`(자동) · `outputs/manual`(수동)에서 직접 확인 가능
 
 ## 환경변수
 

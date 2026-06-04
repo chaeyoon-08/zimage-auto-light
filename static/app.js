@@ -258,17 +258,17 @@ function checkGenDone(s){
 }
 function renderResources(){
   const sc=document.getElementById('resScope');
-  if(sc) sc.textContent = selRep ? ('· ▸ '+selRep.slice(-5).toUpperCase()) : '· 응답 레플리카';
-  let g, peak, lastGen, avgS, minS, maxS;
-  if(selRep){                                   // 레플리카 선택 시 그 레플리카 자원(status)으로
-    const r=repsList().find(x=>x.replica===selRep);
-    if(!r) return;
-    g={vram_used_gb:r.vram_used_gb, vram_total_gb:r.vram_total_gb, ram_used_gb:r.ram_used_gb, ram_total_gb:r.ram_total_gb, util:r.util};
-    peak=r.vram_peak_gb; lastGen=r.last_gen_s; avgS=r.avg_gen_s; minS=r.min_gen_s; maxS=r.max_gen_s;
-  } else {                                       // 미선택 시 응답한 레플리카(/api/resources)
-    if(!RES) return;
-    g=RES.gpu||{}; peak=RES.vram_peak_gb; lastGen=RES.last_gen?.seconds; avgS=RES.gen_avg_s; minS=RES.gen_min_s; maxS=RES.gen_max_s;
+  if(!selRep){   // 선택 안 했으면 아무 레플리카 자원도 보여주지 않는다(헷갈림 방지)
+    if(sc) sc.textContent='· 레플리카 선택 필요';
+    setHTML(document.getElementById('resGrid'),'<div style="grid-column:1/-1;color:var(--text-dim);font-size:12px;padding:22px;text-align:center;line-height:1.5">REPLICAS에서 레플리카를 선택하면<br>그 레플리카의 자원이 표시됩니다</div>');
+    setHTML(document.getElementById('speedGrid'),'');
+    return;
   }
+  if(sc) sc.textContent='· ▸ '+selRep.slice(-5).toUpperCase();
+  const r=repsList().find(x=>x.replica===selRep);
+  if(!r) return;
+  const g={vram_used_gb:r.vram_used_gb, vram_total_gb:r.vram_total_gb, ram_used_gb:r.ram_used_gb, ram_total_gb:r.ram_total_gb, util:r.util};
+  const peak=r.vram_peak_gb, lastGen=r.last_gen_s, avgS=r.avg_gen_s, minS=r.min_gen_s, maxS=r.max_gen_s;
   const lim=+document.getElementById('limitGen').value||null;
   const vover=lim&&g.vram_used_gb!=null&&g.vram_used_gb>lim;
   const vp=g.vram_total_gb?Math.min(100,g.vram_used_gb/g.vram_total_gb*100):0;
@@ -449,9 +449,9 @@ function openImgObj(m){if(!m)return;curImg=m;
   document.getElementById('mFinished').textContent=fmt(m.finished||m.created);
   document.getElementById('mElapsed').textContent=(m.elapsed_s!=null)?(Math.round(m.elapsed_s*1000)/1000+'s'):'–';
   document.getElementById('mFile').textContent=m.id+'.png';
-  // #9 경로: 컨테이너 경로 + 클라우드 저장소 경로(마운트 원본 위치)
-  const cpath=m.png||('/outputs/'+(m.png_sub||'?')+'/'+m.id+'.png');
-  const cloud=cpath.replace('/outputs','Z-Image_Outputs').replace('/workspace','Z-Image_Workspace');
+  // #9 경로: 컨테이너 경로 + 저장소 안 위치(마운트는 /workspace 하나, 그 밑 outputs/)
+  const cpath=m.png||('/workspace/outputs/'+(m.png_sub||'?')+'/'+m.id+'.png');
+  const cloud=cpath.replace(/^\/workspace\//,'');   // 마운트된 /workspace 저장소 안에서의 경로(outputs/…)
   document.getElementById('mPathContainer').textContent=cpath;
   document.getElementById('mPathCloud').textContent=cloud;
   const sz=m.size_bytes?(m.size_bytes/1024/1024).toFixed(1)+'MB':'–';
@@ -531,7 +531,7 @@ function goImageTab(replica){
 // ───────── ⓘ 툴팁 ─────────
 const TIPS={type:'<b>AUTO</b> : 자동화 대량 생성\n<b>MANUAL</b> : UI 테스트 생성',
   run:'배포 시 RUN_ID로 지정한 실행 이름.\n같은 RUN_ID끼리 결과를 공유.\n지정 안 하면 자동 생성됨.',
-  path:'<b>컨테이너</b> : 워크로드 내부 경로\n<b>클라우드 저장소</b> : 마운트된 원본 위치'};
+  path:'<b>컨테이너</b> : 워크로드 안에서 보이는 전체 경로\n<b>저장소</b> : 마운트된 /workspace 저장소 안에서의 위치'};
 function tip(e,key){e.stopPropagation();const t=document.getElementById('tip');
   if(t.classList.contains('on')&&t.dataset.key===key){t.classList.remove('on');return;}
   t.innerHTML=TIPS[key];t.dataset.key=key;t.classList.add('on');

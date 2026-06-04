@@ -3,13 +3,13 @@ zimage-auto-light — Z-Image-Turbo 자동 이미지 생성 REST API (분산/레
 
 레플리카 구조
 - 각 레플리카(파드)는 독립 컨테이너. 자기 server·모델·GPU·메모리를 가짐
-- 유일한 공유 지점은 마운트된 작업 폴더(WORK_DIR=/workspace) 와 보존 폴더(OUTPUT_DIR=/outputs)
+- 유일한 공유 지점은 마운트된 작업 폴더(WORK_DIR=/workspace). OUTPUT_DIR(보존)도 그 밑(/workspace/outputs)
 - 레플리카 식별 = 파드 이름(hostname)
 
 폴더 역할 분리 (A방식)
-- OUTPUT_DIR (/outputs)  : 보존용. 실제 PNG 전부 쌓임(아카이브). /workspace 밖 별도 마운트
-    - /outputs/auto/     : 자동화(환경변수 GEN_COUNT) 생성분
-    - /outputs/manual/   : UI 수동 테스트 생성분
+- OUTPUT_DIR (/workspace/outputs) : 보존용. 실제 PNG 전부 쌓임(아카이브). /workspace 마운트 하나로 공유
+    - /workspace/outputs/auto/     : 자동화(환경변수 GEN_COUNT) 생성분
+    - /workspace/outputs/manual/   : UI 수동 테스트 생성분
 - CURRENT_DIR (/workspace/current/run_<RUN_ID>) : UI 렌더링용(이번 실행만)
     - <id>.json              : 이미지 메타(프롬프트·seed·replica·source·config + 보존 PNG 경로). 가벼움
     - status/<pod>.json      : 레플리카 하트비트(현재 스냅샷)
@@ -55,7 +55,7 @@ except Exception:
 # ─────────────────────────────────────────────────────────────
 MODEL_REPO = os.getenv("MODEL_REPO", "Disty0/Z-Image-Turbo-SDNQ-uint4-svd-r32")
 WORK_DIR = Path(os.getenv("WORK_DIR", "/workspace"))
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "/outputs"))   # /workspace 밖 별도 마운트
+OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "/workspace/outputs"))   # /workspace 밑(마운트 하나로 공유)
 OUTPUT_AUTO_DIR = OUTPUT_DIR / "auto"      # 자동화 생성 PNG
 OUTPUT_MANUAL_DIR = OUTPUT_DIR / "manual"  # UI 수동 테스트 생성 PNG
 REPLICA_ID = socket.gethostname()   # 파드 이름 (예: dep2520-75f955bf6f-5phj7)

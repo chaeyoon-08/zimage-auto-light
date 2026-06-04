@@ -129,7 +129,7 @@
         <div class="gallery-scroll"><div class="gallery" id="gallery"></div></div>
       </div>
       <div class="panel" id="resPanel">
-        <div class="ph"><h2>Resources <span id="resScope" style="font-family:Pretendard;font-size:11px;color:var(--text-dim);text-transform:none;letter-spacing:0;">· 응답 레플리카</span></h2>
+        <div class="ph"><h2>Resources <span id="resScope" style="font-family:Pretendard;font-size:11px;color:var(--text-dim);text-transform:none;letter-spacing:0;">· 레플리카 선택 필요</span></h2>
           <div class="limit-box" style="margin-left:auto"><span>VRAM limit</span><input type="number" placeholder="–" id="limitGen" oninput="applyLimits()"><span>GB</span></div></div>
         <div class="res-grid" id="resGrid"></div>
         <div style="font-size:10px;text-transform:uppercase;color:var(--text-muted);letter-spacing:.05em;margin-bottom:8px;">이미지 1장 생성 시간</div>
@@ -396,7 +396,7 @@
           </ul></div>
         </div>
 
-        <div class="d-sub-h">⑤ Resources · 선택/응답 레플리카</div>
+        <div class="d-sub-h">⑤ Resources · 선택한 레플리카</div>
         <div class="d-row">
           <div class="d-mock">
             <svg viewBox="0 0 300 150" xmlns="http://www.w3.org/2000/svg" font-family="Pretendard,sans-serif">
@@ -571,7 +571,7 @@
                 <text x="146" y="190" fill="#9990b5" font-size="8">시작·종료·걸린</text><text x="226" y="190" fill="#cfc6e6" font-size="8">… · 5.47s</text>
                 <text x="146" y="210" fill="#a987e0" font-size="8.5" font-weight="700">파일</text>
                 <text x="146" y="224" fill="#9990b5" font-size="8">파일</text><text x="178" y="224" fill="#cfc6e6" font-size="7.5">auto-…_seed1009.png</text><rect x="302" y="215" width="18" height="14" rx="4" fill="rgba(255,255,255,.06)"/><text x="311" y="225" fill="#9990b5" font-size="8" text-anchor="middle">↓</text>
-                <text x="146" y="240" fill="#9990b5" font-size="8">경로</text><text x="178" y="240" fill="#cfc6e6" font-size="7" font-family="monospace">📦 /outputs/auto/…png</text>
+                <text x="146" y="240" fill="#9990b5" font-size="8">경로</text><text x="178" y="240" fill="#cfc6e6" font-size="7" font-family="monospace">📦 /workspace/outputs/auto/…png</text>
                 <text x="178" y="252" fill="#cfc6e6" font-size="7" font-family="monospace">☁ Z-Image_Outputs/…png</text>
                 <text x="146" y="268" fill="#9990b5" font-size="8">크기</text><text x="178" y="268" fill="#fff" font-size="8.5" font-weight="700">1.7 MB</text>
                 <!-- 다시 생성 -->
@@ -648,10 +648,10 @@
           <div class="d-faq">
             <details open><summary>생성 버튼이 안 눌려요 (회색이에요)</summary><div class="a">두 경우예요. ① <b>생성이 진행 중</b>이면 끝날 때까지 버튼이 잠깁니다('생성 중...'). ② <b>이전 작업이 남아 있으면</b> 새로 생성되지 않아요. Job Status의 <b>취소</b>에서 그 레플리카를 골라 정리한 뒤 다시 누르세요.</div></details>
             <details><summary>CONFIG를 켰더니 프롬프트가 안 들어가요</summary><div class="a">정상입니다. <b>CONFIG 토글이 ON이면</b> 조건 파일에서 프롬프트를 뽑아 랜덤 생성하므로, 직접 입력한 PROMPT는 비활성화돼 무시돼요. 내가 쓴 프롬프트로 만들려면 토글을 <b>OFF</b>로 두세요.</div></details>
-            <details><summary>Resources가 들쭉날쭉해요</summary><div class="a">레플리카를 <b>고르지 않으면</b> 서비스 URL이 여러 레플리카로 <b>나뉘어 라우팅</b>되기 때문에, Resources가 <b>그때그때 응답한 레플리카</b>의 자원이라 값이 바뀝니다. ③ 레플리카 목록에서 <b>특정 레플리카를 고르면</b> Resources(와 Job Status·갤러리)가 <b>그 레플리카로 고정</b>돼요 — 제목 옆 라벨로 어느 기준인지 확인할 수 있습니다.</div></details>
+            <details><summary>Resources에 아무것도 안 떠요</summary><div class="a">Resources는 <b>레플리카를 선택해야</b> 표시됩니다. ③ 레플리카 목록에서 <b>특정 레플리카를 고르면</b> Resources(와 Job Status·갤러리)가 <b>그 레플리카로 고정</b>돼 그 레플리카의 자원이 나와요. 고르지 않으면 어느 한 레플리카 값이 혼자 떠서 헷갈리지 않도록 <b>비워두고 안내문만</b> 보여줍니다 — 제목 옆 라벨로 현재 기준을 확인할 수 있습니다.</div></details>
             <details><summary>AUTO 이미지와 MANUAL 이미지는 뭐가 달라요?</summary><div class="a"><b>AUTO</b>는 워크로드가 자동 생성 설정(조건 파일)으로 백그라운드에서 만든 것, <b>MANUAL</b>은 생성 탭에서 내가 직접 테스트로 만든 것입니다. 갤러리·이미지 탭에서 ALL·AUTO·MANUAL로 걸러 볼 수 있어요.</div></details>
             <details><summary>'이번 실행'과 '전체'는 뭐가 달라요?</summary><div class="a"><b>이번 실행</b>은 지금 떠 있는 배포(실행)가 만든 이미지만, <b>전체</b>는 클라우드 저장소에 쌓인 <b>이전 실행까지 모든</b> 이미지를 봅니다. (이미지 탭 상단 토글)</div></details>
-            <details><summary>이미지 상세에서 경로가 두 개로 보여요</summary><div class="a">같은 파일을 두 가지로 보여주는 거예요. <b>컨테이너 경로</b>(<span style="font-family:monospace">/outputs/…</span>)는 워크로드 안에서 보이는 경로, <b>클라우드 경로</b>(<span style="font-family:monospace">Z-Image_Outputs/…</span>)는 마운트된 클라우드 저장소에서의 이름입니다.</div></details>
+            <details><summary>이미지 상세에서 경로가 두 개로 보여요</summary><div class="a">같은 파일을 두 가지로 보여주는 거예요. <b>컨테이너 경로</b>(<span style="font-family:monospace">/workspace/outputs/…</span>)는 워크로드 안에서 보이는 전체 경로, <b>저장소 경로</b>(<span style="font-family:monospace">outputs/…</span>)는 마운트된 <b>/workspace 저장소 안에서의 위치</b>입니다. 마운트는 /workspace 하나라, 저장소에 들어가 <b>outputs 폴더</b>에서 생성된 이미지를 확인할 수 있어요.</div></details>
             <details><summary>레플리카가 '지연' 또는 '죽음'으로 떠요</summary><div class="a">상태 갱신이 <b>잠깐(기본 120초)</b> 끊기면 먼저 <b style="color:#ffa94d">지연(주황)</b>으로 표시돼요 — 아직 살아있고 곧 회복될 수 있다는 뜻이라, 죽음으로 깜빡이지 않아요. 갱신이 <b>오래(기본 5분)</b> 끊겨야 비로소 <b style="color:#ff7a8c">죽음(빨강)</b>으로 바뀝니다. 죽음은 노드 빠짐·크래시·네트워크 끊김 등 <b>갱신이 완전히 멈춘</b> 경우예요. 사양이 낮은 노드가 잠깐 느린 정도는 지연 단계에서 머물다 회복됩니다. 대시보드의 '죽은 레플리카 포함'으로 확인할 수 있어요.</div></details>
             <details><summary>모르는 레플리카가 '죽음'으로 먼저 떠 있어요</summary><div class="a">정상입니다. GPU 노드는 <b>붙었다가 반납되고 다른 노드로 교체</b>될 수 있어요. 이때 반납된 옛 노드의 기록이 잠시 <b>죽음(빨강)</b>으로 남아 있을 수 있습니다. 새로 붙은 노드는 <b>모델을 먼저 불러온 뒤</b>(보라 LOADING) 잠깐 있다가 RUNNING으로 뜨기 때문에, 처음엔 죽은 항목만 보이다가 곧 살아있는 레플리카가 나타나요. 죽은 항목이 거슬리면 대시보드의 '죽은 레플리카 포함' 토글로 숨길 수 있습니다.</div></details>
             <details><summary>VRAM limit은 뭘 막아주나요?</summary><div class="a">막아주는 건 아니고 <b>표시</b>해 줍니다. 원하는 사양(GB)을 넣어두면 그보다 많이 쓰는 GPU를 빨갛게/필터로 알려줘서, 자원을 과하게 쓰는 경우를 빨리 찾을 수 있어요.</div></details>
