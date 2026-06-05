@@ -42,11 +42,12 @@ flowchart LR
 ```
 
 - 각 레플리카는 기동 시 모델을 GPU에 로드한 뒤, `conditions.json`을 순회하며 이미지를 생성
-- 원본 PNG는 `/workspace/outputs`, 메타 json은 `/workspace/current`에 기록 (용량 중복 방지)
+- 원본 PNG는 `/workspace/outputs`, 메타 json은 `/workspace/current/<deployment>/<RUN_ID>`에 기록 (용량 중복 방지)
 - 3초마다 heartbeat로 자기 상태(자원·진행·GPU 응답)를 `/workspace`에 갱신
 - 웹 UI는 `/workspace`를 폴링해 전체 레플리카를 집계·표시
-- 상태는 **실행 / 멈춤 / 지연 / 완료 / 죽음** 으로 구분
-  - 지연 = 갱신이 잠깐 늦음(살아있음), 죽음 = 오래 응답 없음 — 깜빡임 방지 2단계 판정
+- 갤러리는 **이번 작업**(이번 `RUN_ID`)과 **전체**(이 deployment의 모든 `RUN_ID`) 보기를 전환 가능
+- 상태는 **실행 / 멈춤 / 지연 / 완료** 로 구분
+  - 지연 = 갱신이 잠깐 늦음(살아있음, 곧 회복). 오래(기본 5분) 갱신이 끊긴 레플리카는 죽은 것으로 보고 목록에서 자동 제외 (갱신을 재개하면 자동 복귀)
 
 ## 클라우드 저장소 마운트 (필수)
 
@@ -75,16 +76,17 @@ flowchart LR
 
 | 변수 | 기본 | 설명 |
 |---|---|---|
-| `RUN_ID` | 자동(파드명 기반) | 실행(회차) 식별자. 회차를 구분하려면 지정 (예: `demo-0601-1`) |
+| `MEM_MODE` | `RAM` | 모델을 어디에 올릴지. `RAM`=모델을 RAM에(VRAM 빠듯한 노드, 예: 8GB) / `VRAM`=모델을 VRAM에(RAM 빠듯한 노드, 예: 12GB) |
+| `RUN_ID` | `default` | 작업 구분 키(권장). 지정하면 그 폴더에 모임, 미지정 시 `default` (예: `실험1`). deployment는 파드명에서 자동 추출 |
 | `RANDOM_PICK` | false | 조건을 순서대로가 아니라 무작위로 뽑을지 |
 | `STALE_SECONDS` | 120 | 이 시간 갱신 없으면 '지연'(주황) |
-| `DEAD_SECONDS` | 300 | 이 시간 갱신 없으면 '죽음'(빨강) |
-| `LOAD_STALE_SECONDS` | 600 | 모델 로드 중(loading) 전용 죽음 임계 |
+| `DEAD_SECONDS` | 300 | 이 시간 갱신 없으면 죽은 것으로 보고 목록에서 제외 |
+| `LOAD_STALE_SECONDS` | 600 | 모델 로드 중(loading) 전용 제외 임계 |
 | `HEARTBEAT_SEC` | 3 | 상태 갱신 주기(초) |
 | `ZIMG_WIDTH` / `ZIMG_HEIGHT` | 1024 | 기본 해상도 |
 | `ZIMG_STEPS` | 8 | 기본 스텝 |
 | `ZIMG_GUIDANCE` | 0.0 | 기본 guidance |
-| `WORK_DIR` / `OUTPUT_DIR` | /workspace, /outputs | 마운트 경로를 바꿀 때만 |
+| `WORK_DIR` / `OUTPUT_DIR` | /workspace, /workspace/outputs | 마운트 경로를 바꿀 때만 |
 
 ## 주요 API
 

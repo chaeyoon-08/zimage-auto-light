@@ -136,7 +136,11 @@ except Exception:
 #   sequential : enable_sequential_cpu_offload — 레이어 단위. VRAM을 더 아끼지만 매우 느림(극저 VRAM용)
 #   none       : pipe.to("cuda") — 모델 전부 VRAM. RAM은 최소지만 VRAM을 많이 써 8GB엔 부적합(CUDA OOM 위험)
 # 8GB VRAM·16GB RAM(T3 최저)에서는 model(+VAE tiling+attention slicing+gc)이 양쪽을 모두 견디는 조합이다.
-MEM_MODE = os.getenv("MEM_MODE", "model").lower()
+# MEM_MODE: 모델을 어디에 올릴지. RAM(기본)=모델을 RAM에(VRAM 빠듯한 노드) / VRAM=모델을 VRAM에(RAM 빠듯한 노드)
+MEM_MODE = os.getenv("MEM_MODE", "RAM").strip().upper()
+if MEM_MODE not in ("VRAM", "RAM"):
+    print(f"[ WARN ] MEM_MODE='{MEM_MODE}' 알 수 없음 → RAM 으로 동작", flush=True)
+    MEM_MODE = "RAM"
 print(f"[ MODEL ] loading {MODEL_REPO} ... (MEM_MODE={MEM_MODE})", flush=True)
 # low_cpu_mem_usage: 로딩 시 RAM 피크를 낮춘다(가중치를 한꺼번에 RAM에 펼치지 않음)
 pipe = ZImagePipeline.from_pretrained(MODEL_REPO, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True)
@@ -146,13 +150,11 @@ for _opt in ("enable_vae_slicing", "enable_vae_tiling", "enable_attention_slicin
         getattr(pipe, _opt)()
     except Exception:
         pass
-# 오프로드 모드 적용
-if MEM_MODE == "none":
-    pipe.to("cuda")                          # RAM 최소(VRAM 충분 노드)
-elif MEM_MODE == "model":
-    pipe.enable_model_cpu_offload()          # 균형(RAM 많이 씀)
-else:                                        # sequential — VRAM을 가장 아끼지만 매우 느림(극저 VRAM 노드용)
-    pipe.enable_sequential_cpu_offload()     # RAM·VRAM 최소, 느림
+# 모델을 어디에 올릴지
+if MEM_MODE == "VRAM":
+    pipe.to("cuda")                          # 모델을 VRAM에(생성 중 RAM 거의 안 씀) — VRAM 여유 노드(예: 12GB)
+else:  # RAM (기본)
+    pipe.enable_model_cpu_offload()          # 모델을 RAM에(컴포넌트씩만 VRAM) — VRAM 빠듯 노드(예: 8GB)
 print("[ MODEL ] ready", flush=True)
 
 # ─────────────────────────────────────────────────────────────
