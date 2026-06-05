@@ -10,12 +10,14 @@ zimage-auto-light — Z-Image-Turbo 자동 이미지 생성 REST API (분산/레
 - OUTPUT_DIR (/workspace/outputs) : 보존용. 실제 PNG 전부 쌓임(아카이브). /workspace 마운트 하나로 공유
     - /workspace/outputs/auto/     : 자동화(환경변수 GEN_COUNT) 생성분
     - /workspace/outputs/manual/   : UI 수동 테스트 생성분
-- CURRENT_DIR (/workspace/current/run_<RUN_ID>) : UI 렌더링용(이번 실행만)
+- CURRENT_DIR (/workspace/current/<deployment>/<RUN_ID>) : UI 렌더링용(이번 작업)
     - <id>.json              : 이미지 메타(프롬프트·seed·replica·source·config + 보존 PNG 경로). 가벼움
     - status/<pod>.json      : 레플리카 하트비트(현재 스냅샷)
     - history/<pod>.recent.jsonl : 시계열 로우데이터(최근, 10초 간격)
     - history/<pod>.rollup.jsonl : 시계열 압축(1분 평균, 장기 보존)
-- UI는 CURRENT_DIR만 스캔 → 이전 작업물과 안 섞임. 어느 레플리카가 응답하든 같은 폴더라 일관
+- deployment = 파드 이름에서 추출, RUN_ID = 필수 환경변수(사용자 지정, 모든 파드 동일)
+- 조회: 현재 작업(scope=run)=이번 RUN_ID 폴더 / 전체(scope=all)=deployment 밑 모든 RUN_ID 폴더
+- 죽은 레플리카는 집계 단계에서 제외 → 옛 작업의 잔존 status도 UI에 안 나옴
 
 이미지 저장: PNG는 OUTPUT_DIR(auto|manual)에 1번만(용량 중복 X), 메타 json만 CURRENT_DIR에 → 둘 분리
 """
@@ -23,6 +25,7 @@ zimage-auto-light — Z-Image-Turbo 자동 이미지 생성 REST API (분산/레
 import os
 import json
 import time
+import gc
 import socket
 import random
 import threading
@@ -58,20 +61,22 @@ WORK_DIR = Path(os.getenv("WORK_DIR", "/workspace"))
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "/workspace/outputs"))   # /workspace 밑(마운트 하나로 공유)
 OUTPUT_AUTO_DIR = OUTPUT_DIR / "auto"      # 자동화 생성 PNG
 OUTPUT_MANUAL_DIR = OUTPUT_DIR / "manual"  # UI 수동 테스트 생성 PNG
-REPLICA_ID = socket.gethostname()   # 파드 이름 (예: dep2520-75f955bf6f-5phj7)
-_run_id_env = os.getenv("RUN_ID", "").strip()
-RUN_ID_AUTO = not _run_id_env   # 사용자가 지정 안 함 → 자동 생성
-if _run_id_env:
-    RUN_ID = _run_id_env
-else:
-    # RUN_ID 미지정 시: 같은 '배포'의 파드는 항상 같은 run 폴더를 써야 서로 보인다.
-    # 파드 이름 <배포>-<RS해시>-<파드해시> 에서 RS해시·파드해시 둘 다 떼고 배포명만 남긴다.
-    # → 재배포(새 ReplicaSet)·노드 교체로 RS가 바뀌어도 같은 폴더를 공유한다.
-    # 예: dep2520-5bd79945f5-8rtfc → auto-dep2520
-    _parts = REPLICA_ID.rsplit("-", 2)
-    _base = _parts[0] if len(_parts) == 3 else REPLICA_ID
-    RUN_ID = "auto-" + _base
-CURRENT_DIR = WORK_DIR / "current" / f"run_{RUN_ID}"   # UI 렌더링용 (실행 격리 키)
+REPLICA_ID = socket.gethostname()   # 파드 이름 (예: dep-000-56788b95bd-fnbsp)
+# deployment 이름 = 파드 이름에서 뒤 2조각(ReplicaSet 해시 + 파드 해시)을 뗀 것.
+# 쿠버네티스 파드명 = <deployment>-<RS해시>-<파드해시> → 뒤 2개만 떼면 deployment에 하이픈(dep-000)이 있어도 안전.
+_parts = REPLICA_ID.rsplit("-", 2)
+DEPLOYMENT = _parts[0] if len(_parts) == 3 else REPLICA_ID   # 예: dep-000
+# RUN_ID: 작업 구분 키(권장). 넣은 값(예: 실험1)을 모든 파드가 동일하게 받아 폴더가 일치한다.
+# 미지정 시 'default'로 동작 → 환경변수 없이도 배포·테스트 가능(같은 deployment면 default끼리 한 폴더에 섞임).
+RUN_ID = os.getenv("RUN_ID", "").strip()
+RUN_ID_MISSING = not RUN_ID
+if RUN_ID_MISSING:
+    RUN_ID = "default"
+# 폴더 계층: /workspace/current/<deployment>/<RUN_ID>
+#   DEPLOY_DIR  = 이 워크로드(deployment)의 모든 RUN_ID 묶음 → 전체 조회(scope=all)
+#   CURRENT_DIR = 이번 작업(RUN_ID)                        → 현재 조회(scope=run)
+DEPLOY_DIR = WORK_DIR / "current" / DEPLOYMENT
+CURRENT_DIR = DEPLOY_DIR / RUN_ID   # UI 렌더링용 (실행 격리 키)
 STATUS_DIR = CURRENT_DIR / "status"
 HISTORY_DIR = CURRENT_DIR / "history"
 CONTROL_DIR = CURRENT_DIR / "control"   # 타겟 제어 명령함: UI가 control/<파드>.json 에 쓰면 해당 레플리카가 읽어 실행
@@ -107,7 +112,7 @@ for d in (OUTPUT_DIR, OUTPUT_AUTO_DIR, OUTPUT_MANUAL_DIR, CURRENT_DIR, STATUS_DI
     d.mkdir(parents=True, exist_ok=True)
 
 print(f"[ INFO ] REPLICA(pod) = {REPLICA_ID}", flush=True)
-print(f"[ INFO ] RUN_ID = {RUN_ID}" + ("  (자동 생성)" if RUN_ID_AUTO else ""), flush=True)
+print(f"[ INFO ] RUN_ID = {RUN_ID}" + ("  (미지정 → default)" if RUN_ID_MISSING else "") + f"  / DEPLOYMENT = {DEPLOYMENT}", flush=True)
 print(f"[ INFO ] OUTPUT_DIR(보존) = {OUTPUT_DIR}  (auto/ , manual/)", flush=True)
 print(f"[ INFO ] CURRENT_DIR(UI)  = {CURRENT_DIR}", flush=True)
 
@@ -125,9 +130,29 @@ except Exception:
 # ─────────────────────────────────────────────────────────────
 # 모델 로드
 # ─────────────────────────────────────────────────────────────
-print(f"[ MODEL ] loading {MODEL_REPO} ...", flush=True)
-pipe = ZImagePipeline.from_pretrained(MODEL_REPO, torch_dtype=torch.bfloat16)
-pipe.enable_model_cpu_offload()
+# 메모리 모드: 노드 사양에 맞춰 선택
+#   model      : enable_model_cpu_offload — 한 번에 한 컴포넌트만 VRAM. 8GB VRAM + VAE tiling 조합의 정석(기본).
+#                모델은 CPU RAM에 상주하지만 uint4라 작고, 생성 후 gc.collect로 RAM 누적을 막는다
+#   sequential : enable_sequential_cpu_offload — 레이어 단위. VRAM을 더 아끼지만 매우 느림(극저 VRAM용)
+#   none       : pipe.to("cuda") — 모델 전부 VRAM. RAM은 최소지만 VRAM을 많이 써 8GB엔 부적합(CUDA OOM 위험)
+# 8GB VRAM·16GB RAM(T3 최저)에서는 model(+VAE tiling+attention slicing+gc)이 양쪽을 모두 견디는 조합이다.
+MEM_MODE = os.getenv("MEM_MODE", "model").lower()
+print(f"[ MODEL ] loading {MODEL_REPO} ... (MEM_MODE={MEM_MODE})", flush=True)
+# low_cpu_mem_usage: 로딩 시 RAM 피크를 낮춘다(가중치를 한꺼번에 RAM에 펼치지 않음)
+pipe = ZImagePipeline.from_pretrained(MODEL_REPO, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True)
+# 추론 중 메모리 절감(모드와 무관, 지원 안 하면 조용히 건너뜀)
+for _opt in ("enable_vae_slicing", "enable_vae_tiling", "enable_attention_slicing"):
+    try:
+        getattr(pipe, _opt)()
+    except Exception:
+        pass
+# 오프로드 모드 적용
+if MEM_MODE == "none":
+    pipe.to("cuda")                          # RAM 최소(VRAM 충분 노드)
+elif MEM_MODE == "model":
+    pipe.enable_model_cpu_offload()          # 균형(RAM 많이 씀)
+else:                                        # sequential — VRAM을 가장 아끼지만 매우 느림(극저 VRAM 노드용)
+    pipe.enable_sequential_cpu_offload()     # RAM·VRAM 최소, 느림
 print("[ MODEL ] ready", flush=True)
 
 # ─────────────────────────────────────────────────────────────
@@ -211,6 +236,8 @@ def _run_generation(prompt, width, height, steps, guidance, seed, source, config
         LAST_GEN["peak_vram_mb"] = round(peak_gb * 1024, 1)
         free_b, total_b = torch.cuda.mem_get_info()
         LAST_GEN["device_used_mb"] = round((total_b - free_b) / 1024**2, 1)
+        torch.cuda.empty_cache()   # 생성 후 GPU 캐시 반환
+    gc.collect()                   # 생성 후 시스템 RAM 회수 — offload 시 누적되는 RAM 방지
     GEN_TIMES.append(elapsed)
     TOTAL_GEN_SECONDS += elapsed
     if peak_gb is not None:
@@ -286,7 +313,7 @@ class JobManager:
                 "message": self.message, "config_file": self.config_file,
                 "busy": self.state in ("running", "paused")}
 
-    def start(self, conditions, count, random_pick, config_file=None):
+    def start(self, conditions, count, random_pick, config_file=None, source="manual"):
         if self.state in ("running", "paused"):
             raise HTTPException(409, "이미 작업이 진행 중입니다.")
         if not isinstance(conditions, list) or not conditions:
@@ -296,16 +323,17 @@ class JobManager:
         self.job_started = dt.datetime.now(); self.job_finished = None
         self._cancel.clear(); self._resume.set()
         self._thread = threading.Thread(target=self._worker,
-                                        args=(conditions, int(count), bool(random_pick), config_file),
+                                        args=(conditions, int(count), bool(random_pick), config_file, source),
                                         daemon=True)
         self._thread.start()
 
     def _pick(self, conds, idx, rnd):
         return random.choice(conds) if rnd else conds[idx % len(conds)]
 
-    def _worker(self, conds, count, rnd, config_file):
-        # config_file 이 있으면 source=auto(자동화), 없으면 manual(개수>1 수동)
-        src = "auto" if config_file else "manual"
+    def _worker(self, conds, count, rnd, config_file, source):
+        # source는 출처로 결정한다: UI 생성=manual, 배포 시 자동 생성=auto.
+        # (config_file 유무로 가르지 않는다 — UI에서 config 파일로 생성해도 manual 이어야 하므로)
+        src = source
         try:
             for i in range(count):
                 if self._cancel.is_set():
@@ -550,7 +578,7 @@ def _startup():
     if GEN_COUNT and CONDITIONS_FILE:
         try:
             conds = _load_conditions_file(CONDITIONS_FILE)
-            job.start(conds, int(GEN_COUNT), RANDOM_PICK, config_file=CONDITIONS_FILE)
+            job.start(conds, int(GEN_COUNT), RANDOM_PICK, config_file=CONDITIONS_FILE, source="auto")
             print(f"[ AUTO ] 자동화 시작: {GEN_COUNT}장 / {CONDITIONS_FILE} / random={RANDOM_PICK}", flush=True)
         except Exception as e:
             print(f"[ AUTO ] 자동화 시작 실패: {e}", flush=True)
@@ -581,7 +609,7 @@ def generate(
     cond = {"prompt": prompt, "width": width, "height": height,
             "steps": num_inference_steps, "guidance": guidance_scale, "seed": seed}
     if count and count > 1:
-        job.start([cond], int(count), random_pick=False, config_file=None)  # 수동 다량
+        job.start([cond], int(count), random_pick=False, config_file=None, source="manual")  # 수동 다량
         return JSONResponse({"mode": "job", "status": job.status()})
     with gpu_lock:
         meta = _run_generation(prompt, width, height, num_inference_steps,
@@ -601,7 +629,7 @@ def job_start(count: int = Body(None), conditions_file: str = Body(None), random
     r = random_pick if random_pick is not None else RANDOM_PICK
     if not c or not f:
         raise HTTPException(400, "count 와 conditions_file 이 필요합니다.")
-    job.start(_load_conditions_file(f), c, r, config_file=f)
+    job.start(_load_conditions_file(f), c, r, config_file=f, source="manual")   # UI에서 config로 생성 → manual
     return job.status()
 
 
@@ -674,7 +702,7 @@ def model_info():
     base = repo.split("/")[-1].split("-SDNQ")[0]
     low = repo.lower()
     dtype = next((d for d in ("uint4", "int8", "int4", "uint8", "fp8") if d in low), "?")
-    return {"repo": repo, "name": base, "dtype": dtype, "run_id": RUN_ID, "run_auto": RUN_ID_AUTO}
+    return {"repo": repo, "name": base, "dtype": dtype, "run_id": RUN_ID, "deployment": DEPLOYMENT, "run_missing": RUN_ID_MISSING}
 
 
 @app.get("/api/replicas")
@@ -723,6 +751,8 @@ def _read_status_dir():
             else:
                 r["_slow"] = (age is not None and STALE_SECONDS < age <= DEAD_SECONDS)
                 r["_stale"] = (age is not None and age > DEAD_SECONDS)
+            if r.get("_stale"):
+                continue   # 죽은 레플리카(갱신 끊김 또는 옛 작업의 잔존 status)는 집계에서 제외 → UI에 안 나옴
             reps.append(r)
     except Exception:
         pass
@@ -815,8 +845,8 @@ def list_images(replica: str = None, source: str = None, scope: str = "run", lim
     """이미지 목록(최근순). 기본(run)은 백그라운드 스냅샷을 메모리에서 즉시 반환(파일 I/O 없음).
     scope=all(드문 경우)만 모든 실행 폴더를 그 자리에서 직접 읽는다."""
     if scope == "all":
-        runs_root = CURRENT_DIR.parent
-        dirs = sorted((d for d in runs_root.glob("run_*") if d.is_dir())) if runs_root.exists() else []
+        # 이 deployment(워크로드) 밑 모든 RUN_ID 폴더의 이미지 메타 → 전체 조회
+        dirs = sorted((d for d in DEPLOY_DIR.glob("*") if d.is_dir())) if DEPLOY_DIR.exists() else []
         metas = _collect_images(dirs, (limit or 1000) * 3)
     else:
         with _snap_lock:
