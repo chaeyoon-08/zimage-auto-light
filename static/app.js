@@ -5,7 +5,7 @@ async function j(u){const ctrl=new AbortController();const t=setTimeout(()=>ctrl
 async function post(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});const d=await r.json().catch(()=>({}));return{ok:r.ok,status:r.status,data:d};}
 
 // ───────── 상태 ─────────
-let TAB='gen', galFilter='all', galScope='run', selRep=null, MODEL={name:'Z-Image-Turbo',dtype:'uint4'};
+let TAB='gen', galFilter='all', selRep=null, MODEL={name:'Z-Image-Turbo',dtype:'uint4'};
 let REPS=[], REPS_RAW=[], IMAGES=[], RES=null, CONDS=[], selectedConfig=null;
 let loaded={gal:false,reps:false,cards:false,img:false};   // 첫 fetch 완료 여부 (로딩 스피너 표시용)
 let repStore={};   // 한 번 본 레플리카는 계속 보관(누적) → 자리 고정·안 사라짐
@@ -339,9 +339,8 @@ function renderReplist(){
 // 갤러리만 즉시 다시 받아온다 — 전체 poll의 겹침 방지 가드·순차 대기를 건너뛰어,
 // 레플리카/필터 선택이 1~2분 밀리지 않고 바로 반영되게 한다(이미지 목록만 가볍게 fetch)
 async function reloadGallery(){
-  try{IMAGES=await j('/api/images?scope='+galScope+'&source='+(galFilter==='all'?'':galFilter)+(selRep?('&replica='+encodeURIComponent(selRep)):''));loaded.gal=true;renderGallery();}catch(e){}
+  try{IMAGES=await j('/api/images?source='+(galFilter==='all'?'':galFilter)+(selRep?('&replica='+encodeURIComponent(selRep)):''));loaded.gal=true;renderGallery();}catch(e){}
 }
-function setGalScope(s,btn){galScope=s;recentMode=false;[...document.getElementById('galScopeSeg').children].forEach(b=>b.classList.remove('on'));btn.classList.add('on');updateGalFilter();reloadGallery();}
 function selReplica(id){selRep=id;recentMode=false;document.getElementById('repAll').classList.toggle('on',id===null);
   renderJob(); renderResources();   // 선택 즉시 Job Status·Resources 반영(기존 repStore 데이터로)
   updateGalFilter();reloadGallery();}
