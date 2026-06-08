@@ -21,13 +21,16 @@ function show(v){TAB=v;
   document.getElementById('vGen').hidden=v!=='gen';
   document.getElementById('vDash').hidden=v!=='dash';
   document.getElementById('vImg').hidden=v!=='img';
+  document.getElementById('vCompare').hidden=v!=='compare';
   document.getElementById('vDocs').hidden=v!=='docs';
   document.getElementById('tGen').classList.toggle('on',v==='gen');
   document.getElementById('tDash').classList.toggle('on',v==='dash');
   document.getElementById('tImg').classList.toggle('on',v==='img');
+  document.getElementById('tCmp').classList.toggle('on',v==='compare');
   document.getElementById('tDocs').classList.toggle('on',v==='docs');
   if(v==='dash')reloadReplicas();
   if(v==='img')loadImgTab();
+  if(v==='compare')cmpInit();
   if(v==='docs'){if(!document.querySelector('#docsBody .d-sec.on'))showDoc('intro');}}
 // 사용법: 왼쪽 목차(리모콘) 클릭 → 해당 섹션으로 스크롤 / 스크롤 시 현재 섹션 목차 강조
 function showDoc(id,btn){
@@ -796,3 +799,245 @@ async function init(){
   poll();setInterval(()=>{if(TAB==='gen')poll();else reloadReplicas();},3000);
 }
 init();
+
+// ═══════════════════════════════════════════════════════════════════
+// 비교 탭 (GPU 성능·비용 비교)
+//  · 가격/정책: /api/gpu_profiles 에서 실제로 읽음 (gpu_profiles.json)
+//  · 성능(STATS): 통계함 백엔드 구현 전이라 가데이터(placeholder). 통계함 완성 시 fetch로 교체.
+// ═══════════════════════════════════════════════════════════════════
+const CMP_MAX=4, CMP_MIN=2, CMP_DT=10000;
+// ── 가데이터: 통계함(측정 성능). 키 = provider|model|mem_mode ──
+const CMP_STATS = {
+  "GCUBE|RTX 5090|VRAM": {vram:19.0,err:0.4,dtype:'uint4',runs:[
+    {d:'06-08 14:30',n:1200,spm:2.0,w:1024,h:1024,steps:8,gd:1.0},
+    {d:'06-07 09:10',n:2400,spm:1.9,w:1024,h:1024,steps:8,gd:1.0},
+    {d:'06-05 22:05',n:800,spm:2.2,w:768,h:768,steps:8,gd:1.0},
+    {d:'06-04 10:15',n:600,spm:3.0,w:1024,h:1024,steps:12,gd:1.5}]},
+  "GCUBE|RTX 5060|RAM": {vram:7.4,err:1.8,dtype:'uint4',runs:[
+    {d:'06-08 11:00',n:1600,spm:6.1,w:1024,h:1024,steps:8,gd:1.0},
+    {d:'06-06 15:40',n:1500,spm:5.9,w:1024,h:1024,steps:8,gd:1.0}]},
+  "RunPod|RTX 5090|VRAM": {vram:19.0,err:0.6,dtype:'uint4',cond:{w:1024,h:1024,steps:8,gd:1.0,spm:2.0,n:1200}},
+  "Replicate|A100 40GB|VRAM": {vram:24.0,err:0.3,dtype:'uint4',cond:{w:512,h:512,steps:4,gd:1.0,spm:1.6,n:900}},
+  "fal.ai|RTX 5090|VRAM": {vram:19.0,err:0.5,dtype:'uint4',cond:{w:1024,h:1024,steps:8,gd:1.0,spm:2.1,n:1100}}
+};
+let CMP_PROFILES=null, CMP_SRC={}, CMP_GPUS=[], CMP_loaded=false;
+const CMP_sel=new Set(); let CMP_compareMode=false, CMP_cache=null;
+let CMP_basis='actual', CMP_mode='count', CMP_condF={res:'ALL',step:'ALL',guid:'ALL'};
+let CMP_pendRes='ALL', CMP_pendStep='ALL', CMP_pendGuid='ALL';
+let CMP_mId=null, CMP_mBasis='actual', CMP_mMode='count', CMP_mTarget=CMP_DT, CMP_mCond={res:'ALL',step:'ALL',guid:'ALL'};
+const cmpWon=n=>'₩'+Math.round(n).toLocaleString('ko-KR');
+const cmpFnum=n=>Math.round(n).toLocaleString('ko-KR');
+const cmpBill=b=>b==='minute'?'분 단위 과금':'시간 단위 과금';
+function cmpSlug(s){return (s||'').toLowerCase().replace(/[^a-z0-9]+/g,'')||'p';}
+
+async function cmpInit(){
+  if(CMP_loaded){cmpRenderCatalog();return;}
+  try{CMP_PROFILES=await j('/api/gpu_profiles');}catch(e){CMP_PROFILES={providers:[]};}
+  CMP_build(); CMP_loaded=true; cmpShowSub('cat'); cmpRenderCatalog();
+}
+function CMP_build(){
+  CMP_SRC={}; CMP_GPUS=[]; let i=0;
+  ((CMP_PROFILES&&CMP_PROFILES.providers)||[]).forEach(p=>{
+    const key=cmpSlug(p.provider);
+    CMP_SRC[key]={label:(p.provider||'').toUpperCase(), cls:p.kind==='self'?'gcube':'ext'};
+    (p.gpus||[]).forEach(gp=>{
+      const sk=`${p.provider}|${gp.model}|${gp.mem_mode}`;
+      const perf=CMP_STATS[sk]||{vram:0,err:0,dtype:'-',cond:{w:1024,h:1024,steps:8,gd:1.0,spm:2.0,n:0}};
+      const bill=p.billing||{};
+      CMP_GPUS.push({id:'gpu'+(i++),src:key,self:p.kind==='self',name:gp.model,mode:gp.mem_mode,
+        price:gp.price_per_hour||0,base:bill.base_fee||0,storage:bill.storage_fee||0,
+        billing:bill.unit||'hour',date:p.kind==='self'?null:(p.measured_at||null),
+        vram:perf.vram,err:perf.err,dtype:perf.dtype,runs:perf.runs,cond:perf.cond});
+    });
+  });
+}
+function cmpCondStats(g){
+  if(g.runs){const by={};g.runs.forEach(r=>{const gd=r.gd!=null?r.gd:1.0;const key=`${r.w}×${r.h}·${r.steps}·${gd}`;if(!by[key])by[key]={res:`${r.w}×${r.h}`,step:r.steps,guid:gd,n:0,t:0};by[key].n+=r.n;by[key].t+=r.spm*r.n;});
+    Object.values(by).forEach(o=>{o.spm=o.t/o.n;o.iph=3600/o.spm;});
+    const tot=Object.values(by).reduce((a,o)=>a+o.n,0);const aspm=Object.values(by).reduce((a,o)=>a+o.spm*o.n,0)/tot;
+    return{by,all:{spm:aspm,iph:3600/aspm,n:tot}};}
+  const c=g.cond||{w:0,h:0,steps:0,gd:1.0,spm:1,n:0};const gd=c.gd!=null?c.gd:1.0;const key=`${c.w}×${c.h}·${c.steps}·${gd}`;
+  return{by:{[key]:{res:`${c.w}×${c.h}`,step:c.steps,guid:gd,spm:c.spm,iph:3600/c.spm,n:c.n}},all:{spm:c.spm,iph:3600/c.spm,n:c.n}};
+}
+function cmpEff(g,f){const cs=cmpCondStats(g);if(!f||f.res==='ALL')return cs.all;
+  const ks=Object.values(cs.by).filter(o=>o.res===f.res&&(f.step==='ALL'||String(o.step)===String(f.step))&&(f.guid==='ALL'||String(o.guid)===String(f.guid)));
+  if(!ks.length)return null;let n=0,t=0;ks.forEach(o=>{n+=o.n;t+=o.spm*o.n;});const spm=t/n;return{spm,iph:3600/spm,n};}
+function cmpCompute(g,st,bss,m,t){let images,hours;
+  if(bss==='actual'){images=st.n;hours=st.n*st.spm/3600;}
+  else{if(m==='count'){images=t;hours=st.iph>0?images/st.iph:0;}else{hours=t;images=hours*st.iph;}}
+  const bh=g.billing==='minute'?Math.ceil(hours*60)/60:Math.ceil(hours);const gpu=g.price*bh;const total=gpu+g.base+g.storage;
+  return{images,hours,bh,gpu,total,cpp:images>0?total/images:0};}
+
+function cmpRenderCatalog(){
+  const card=g=>{const s=CMP_SRC[g.src];const st=cmpEff(g,{res:'ALL'});const c=cmpCompute(g,st,'pred','count',CMP_DT);
+    const chip=g.mode==='VRAM'?'<span class="cmp-chip vram">VRAM</span>':'<span class="cmp-chip ram">RAM</span>';
+    return `<div class="cmp-card ${s.cls} ${CMP_sel.has(g.id)?'sel':''}" onclick="cmpCardClick(event,'${g.id}')">
+      <div class="cmp-ctop"><span class="cmp-cbx" onclick="event.stopPropagation();cmpSelect('${g.id}')">✓</span>
+        <span class="cmp-badge ${s.cls}">${s.label}</span>${g.date?`<span class="cmp-cdate">${g.date} (KST)</span>`:''}</div>
+      <div class="cmp-cname">${g.name} ${chip}</div>
+      <div class="cmp-cpplab">원 / 장</div><div class="cmp-cppbig">${c.cpp.toFixed(1)}<small> 원</small></div>
+      <div class="cmp-cppnote">1만 장 기준 예상 · ${cmpBill(g.billing)}</div>
+      <div class="cmp-cfoot">장/시간 <b>${cmpFnum(st.iph)}</b> · 단가 <b>${cmpWon(g.price)}/h</b></div></div>`;};
+  const grp=(label,self)=>{const items=CMP_GPUS.filter(g=>g.self===self);if(!items.length)return'';
+    return `<div class="cmp-srcgroup"><div class="cmp-srclabel ${self?'gcube':'ext'}">${label}</div><div class="cmp-cards">${items.map(card).join('')}</div></div>`;};
+  let html=grp('자사 (GCUBE)',true)+grp('경쟁사',false);
+  if(!CMP_GPUS.length)html=`<div class="cmp-empty">등록된 GPU가 없습니다.<div class="e2">gpu_profiles.json 을 ⬆ 프로파일 불러오기로 업로드하거나 /workspace/ 에 넣고 ↻ 새로고침 하세요.</div></div>`;
+  document.getElementById('cmpCatalog').innerHTML=html;
+  document.getElementById('vCompare').classList.toggle('cmp-on',CMP_compareMode);
+  const n=CMP_sel.size;
+  document.getElementById('cmpModeBtn').classList.toggle('on',CMP_compareMode);
+  document.getElementById('cmpSelCount').innerHTML=CMP_compareMode?`<b>${n}</b> / ${CMP_MAX} 선택`:'';
+  document.getElementById('cmpAnaBtn').style.display=CMP_compareMode?'':'none';
+  document.getElementById('cmpAnaBtn').disabled=n<CMP_MIN;
+}
+function cmpToggleCompare(){CMP_compareMode=!CMP_compareMode;if(!CMP_compareMode)CMP_sel.clear();cmpRenderCatalog();}
+function cmpSelect(id){if(CMP_sel.has(id))CMP_sel.delete(id);else{if(CMP_sel.size>=CMP_MAX){cmpToast(`최대 ${CMP_MAX}개까지 비교할 수 있어요.`);return;}CMP_sel.add(id);}cmpRenderCatalog();}
+function cmpCardClick(e,id){cmpOpenModal(id);}
+
+async function cmpRefresh(){const b=document.getElementById('cmpRefreshBtn');b.style.opacity=.5;
+  try{CMP_PROFILES=await j('/api/gpu_profiles');CMP_build();}catch(e){}
+  b.style.opacity=1;cmpRenderCatalog();cmpToast('gpu_profiles.json · 통계를 다시 읽었어요.');}
+function cmpImport(file){if(!file)return;const r=new FileReader();
+  r.onload=async()=>{let obj;try{obj=JSON.parse(r.result);if(!obj||!Array.isArray(obj.providers))throw new Error('providers 배열이 없습니다');}
+    catch(e){cmpToast('불러오기 실패: '+e.message);return;}
+    const res=await post('/api/gpu_profiles',obj);
+    if(res.ok){CMP_PROFILES=obj;CMP_build();CMP_sel.clear();cmpRenderCatalog();cmpToast('gpu_profiles.json 저장·반영 완료 (전체 레플리카 공유).');}
+    else cmpToast('저장 실패: '+((res.data&&res.data.error)||res.status));};
+  r.readAsText(file);document.getElementById('cmpFile').value='';}
+function cmpExportProfiles(){const blob=JSON.stringify(CMP_PROFILES||{providers:[]},null,2);
+  const b=new Blob([blob],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='gpu_profiles.json';a.click();
+  cmpToast('gpu_profiles.json 내려받음 — 복구 시 /workspace/ 에 넣고 새로고침.');}
+
+function cmpOpenModal(id){CMP_mId=id;CMP_mBasis='actual';CMP_mMode='count';CMP_mTarget=CMP_DT;CMP_mCond={res:'ALL',step:'ALL',guid:'ALL'};cmpRenderModal();document.getElementById('cmpOverlay').classList.add('show');}
+function cmpCloseModal(){document.getElementById('cmpOverlay').classList.remove('show');}
+function cmpMSet(k,v){if(k==='basis')CMP_mBasis=v;if(k==='mode')CMP_mMode=v;if(k==='res')CMP_mCond={res:v,step:'ALL',guid:'ALL'};if(k==='step'){CMP_mCond.step=v;CMP_mCond.guid='ALL';}if(k==='guid')CMP_mCond.guid=v;if(k==='target')CMP_mTarget=parseFloat((v||'').replace(/,/g,''))||0;cmpRenderModal();}
+function cmpRenderModal(){
+  const g=CMP_GPUS.find(x=>x.id===CMP_mId);const s=CMP_SRC[g.src];const cs=cmpCondStats(g);
+  const st=cmpEff(g,CMP_mCond)||cs.all;const c=cmpCompute(g,st,CMP_mBasis,CMP_mMode,CMP_mTarget);
+  const segs=[{l:'GPU 시간',v:c.gpu,col:'#B47AFF'},{l:'기본금',v:g.base,col:'#ffd580'},{l:'스토리지',v:g.storage,col:'#7fb3ff'}];
+  const tot=segs.reduce((a,x)=>a+x.v,0)||1;const CC=2*Math.PI*52;let off=0;
+  const arcs=segs.map(x=>{const len=x.v/tot*CC;const a=`<circle cx="70" cy="70" r="52" fill="none" stroke="${x.col}" stroke-width="20" stroke-dasharray="${len.toFixed(1)} ${(CC-len).toFixed(1)}" stroke-dashoffset="${(-off).toFixed(1)}" transform="rotate(-90 70 70)"/>`;off+=len;return a;}).join('');
+  const legend=segs.map(x=>`<div><span class="sw" style="background:${x.col}"></span>${x.l}<b>${(x.v/tot*100).toFixed(0)}%</b></div>`).join('');
+  const resList=[...new Set(Object.values(cs.by).map(o=>o.res))];
+  const stepList=[...new Set(Object.values(cs.by).filter(o=>CMP_mCond.res==='ALL'||o.res===CMP_mCond.res).map(o=>o.step))].sort((a,b)=>a-b);
+  const guidList=[...new Set(Object.values(cs.by).filter(o=>(CMP_mCond.res==='ALL'||o.res===CMP_mCond.res)&&(CMP_mCond.step==='ALL'||String(o.step)===String(CMP_mCond.step))).map(o=>o.guid))].sort((a,b)=>a-b);
+  const tip=CMP_mBasis==='actual'?`실측 누적 (${cmpFnum(c.images)}장)`:`${CMP_mMode==='count'?cmpFnum(CMP_mTarget)+'장':cmpFnum(CMP_mTarget)+'시간'} 가정`;
+  const runs=g.runs?`<div class="cmp-mblock"><div class="cmp-h4">완료 실행 로그</div><div class="cmp-runlist">
+    <div class="rr"><span>완료 시각</span><span>장수</span><span>초/장</span><span>조건</span></div>
+    ${g.runs.map(r=>`<div class="rr"><b>${r.d}</b><b>${cmpFnum(r.n)}</b><b>${r.spm.toFixed(1)}s</b>${r.w}×${r.h} · ${r.steps}step</div>`).join('')}</div></div>`
+    :`<div class="cmp-mblock"><div class="cmp-h4">측정 정보</div>
+       <div class="cmp-kv"><span>측정 기준일</span><b>${g.date||'-'} (KST)</b></div>
+       <div class="cmp-kv"><span>측정 표본</span><b>${cmpFnum((g.cond||{}).n||0)}장</b></div>
+       <div class="cmp-kv"><span>가격 입력</span><b>달러가 → 원화 환산 입력</b></div></div>`;
+  document.getElementById('cmpModal').innerHTML=`
+    <div class="cmp-mhead"><span class="cmp-badge ${s.cls}">${s.label}</span><span class="cmp-mch">${g.name}</span>
+      <span class="cmp-chip ${g.mode==='VRAM'?'vram':'ram'}">${g.mode}</span><button class="cmp-mclose" onclick="cmpCloseModal()">×</button></div>
+    <div class="cmp-mctrl">
+      <span class="cmp-lab">조건</span>
+      <select onchange="cmpMSet('res',this.value)"><option value="ALL" ${CMP_mCond.res==='ALL'?'selected':''}>전체</option>${resList.map(r=>`<option value="${r}" ${CMP_mCond.res===r?'selected':''}>${r}</option>`).join('')}</select>
+      <select onchange="cmpMSet('step',this.value)" ${CMP_mCond.res==='ALL'?'disabled':''}><option value="ALL">step 전체</option>${stepList.map(x=>`<option value="${x}" ${String(CMP_mCond.step)===String(x)?'selected':''}>${x} step</option>`).join('')}</select>
+      <select onchange="cmpMSet('guid',this.value)" ${(CMP_mCond.res==='ALL'||CMP_mCond.step==='ALL')?'disabled':''}><option value="ALL">g 전체</option>${guidList.map(x=>`<option value="${x}" ${String(CMP_mCond.guid)===String(x)?'selected':''}>g ${x}</option>`).join('')}</select>
+      <span class="cmp-vdiv"></span>
+      <span class="cmp-lab">기준</span>
+      <div class="cmp-seg"><button class="${CMP_mBasis==='actual'?'on':''}" onclick="cmpMSet('basis','actual')">실측</button><button class="${CMP_mBasis==='pred'?'on':''}" onclick="cmpMSet('basis','pred')">예측</button></div>
+      <div class="cmp-seg"><button class="${CMP_mMode==='count'?'on':''}" ${CMP_mBasis!=='pred'?'disabled':''} onclick="cmpMSet('mode','count')">장 수</button><button class="${CMP_mMode==='time'?'on':''}" ${CMP_mBasis!=='pred'?'disabled':''} onclick="cmpMSet('mode','time')">시간</button></div>
+      <input type="text" value="${CMP_mBasis==='pred'?(CMP_mMode==='count'?cmpFnum(CMP_mTarget):CMP_mTarget):''}" ${CMP_mBasis!=='pred'?'disabled':''} oninput="cmpMSet('target',this.value)" placeholder="${CMP_mMode==='count'?'장':'시간'}">
+    </div>
+    <div class="cmp-mgrid">
+      <div class="cmp-donut"><div class="cmp-h4">비용 구성 · ${tip}</div>
+        <svg width="140" height="140" viewBox="0 0 140 140"><circle cx="70" cy="70" r="52" fill="none" stroke="rgba(255,255,255,.05)" stroke-width="20"/>${arcs}
+          <text x="70" y="64" text-anchor="middle" fill="#fff" font-size="20" font-weight="700">${c.cpp.toFixed(1)}</text>
+          <text x="70" y="82" text-anchor="middle" fill="#A0A0B0" font-size="10">원 / 장</text></svg>
+        <div class="cmp-legend">${legend}<div style="border-top:1px solid var(--line);margin-top:6px;padding-top:6px">총비용<b>${cmpWon(c.total)}</b></div></div></div>
+      <div><div class="cmp-h4">성능 · 신뢰도 <span style="opacity:.6;font-weight:400">(선택 조건 실측)</span></div>
+        <div class="cmp-mstats">
+          <div class="cmp-stat"><div class="l">초 / 장</div><div class="v">${st.spm.toFixed(1)}<small>s</small></div></div>
+          <div class="cmp-stat"><div class="l">장 / 시간</div><div class="v">${cmpFnum(st.iph)}</div></div>
+          <div class="cmp-stat"><div class="l">VRAM peak</div><div class="v">${(g.vram||0).toFixed(1)}<small>GB</small></div></div>
+          <div class="cmp-stat"><div class="l">실패율</div><div class="v">${(g.err||0).toFixed(1)}<small>%</small></div></div>
+          <div class="cmp-stat"><div class="l">표본</div><div class="v">${cmpFnum(st.n)}<small>장</small></div></div>
+          <div class="cmp-stat"><div class="l">양자화</div><div class="v">${g.dtype||'-'}</div></div></div></div>
+    </div>${runs}`;
+}
+
+function cmpShowSub(sub){document.getElementById('cmpSubCat').hidden=sub!=='cat';document.getElementById('cmpSubAna').hidden=sub!=='ana';
+  document.getElementById('cmpTcat').classList.toggle('on',sub==='cat');document.getElementById('cmpTana').classList.toggle('on',sub==='ana');
+  if(sub==='ana')cmpRenderAnalysis();}
+function cmpRunAnalysis(){CMP_cache={ids:[...CMP_sel]};CMP_basis='actual';CMP_mode='count';CMP_condF={res:'ALL',step:'ALL',guid:'ALL'};CMP_pendRes='ALL';CMP_pendStep='ALL';CMP_pendGuid='ALL';cmpShowSub('ana');}
+function cmpUOpts(field,res,step){const set=new Set();CMP_cache.ids.forEach(id=>Object.values(cmpCondStats(CMP_GPUS.find(g=>g.id===id)).by).forEach(o=>{
+  if(field==='res'){set.add(o.res);return;}
+  if(field==='step'){if(res==='ALL'||o.res===res)set.add(o.step);return;}
+  if(field==='guid'){if((res==='ALL'||o.res===res)&&(step==='ALL'||String(o.step)===String(step)))set.add(o.guid);}}));return[...set].sort((a,b)=>a-b);}
+function cmpCondGroup(){const stepOpts=cmpUOpts('step',CMP_pendRes),guidOpts=cmpUOpts('guid',CMP_pendRes,CMP_pendStep);
+  document.getElementById('cmpCondGroup').innerHTML=
+    `<select id="cmpResSel" onchange="cmpOnRes(this.value)"><option value="ALL" ${CMP_pendRes==='ALL'?'selected':''}>해상도 전체</option>${cmpUOpts('res').map(r=>`<option value="${r}" ${CMP_pendRes===r?'selected':''}>${r}</option>`).join('')}</select>`
+   +`<select id="cmpStepSel" onchange="cmpOnStep(this.value)" ${CMP_pendRes==='ALL'?'disabled':''}><option value="ALL">step 전체</option>${stepOpts.map(s=>`<option value="${s}" ${String(CMP_pendStep)===String(s)?'selected':''}>${s} step</option>`).join('')}</select>`
+   +`<select id="cmpGuidSel" onchange="CMP_pendGuid=this.value" ${(CMP_pendRes==='ALL'||CMP_pendStep==='ALL')?'disabled':''}><option value="ALL">guidance 전체</option>${guidOpts.map(x=>`<option value="${x}" ${String(CMP_pendGuid)===String(x)?'selected':''}>g ${x}</option>`).join('')}</select>`
+   +`<button class="cmp-mini go" onclick="cmpApplyCond()">조회</button>`;}
+function cmpOnRes(v){CMP_pendRes=v;CMP_pendStep='ALL';CMP_pendGuid='ALL';cmpCondGroup();}
+function cmpOnStep(v){CMP_pendStep=v;CMP_pendGuid='ALL';cmpCondGroup();}
+function cmpCondLabel(c){return c.res==='ALL'?'전체':c.res+(c.step==='ALL'?'':' · '+c.step+'step')+(c.guid==='ALL'||c.step==='ALL'?'':' · g'+c.guid);}
+function cmpApplyCond(){CMP_condF={res:CMP_pendRes,step:CMP_pendStep,guid:CMP_pendGuid};cmpRecalc();cmpToast('조건 적용: '+cmpCondLabel(CMP_condF));}
+function cmpReset(){CMP_basis='actual';CMP_mode='count';CMP_condF={res:'ALL',step:'ALL',guid:'ALL'};CMP_pendRes='ALL';CMP_pendStep='ALL';CMP_pendGuid='ALL';cmpRenderAnalysis();cmpToast('초기화 — 전체 조건 · 실측 기준');}
+function cmpSetBasis(b){CMP_basis=b;cmpRenderAnalysis();}
+function cmpSetMode(m){CMP_mode=m;cmpRenderAnalysis();}
+function cmpGetTarget(){const el=document.getElementById('cmpTarget');return el?(parseFloat((el.value||'').replace(/,/g,''))||0):CMP_DT;}
+function cmpToggleSave(e){e.stopPropagation();document.getElementById('cmpSaveMenu').classList.toggle('show');}
+
+function cmpRenderAnalysis(){
+  const box=document.getElementById('cmpAna');
+  if(!CMP_cache){box.innerHTML=`<div class="cmp-empty">비교 분석 내용 없음<div class="e2">카탈로그에서 비교 모드를 켜고 ${CMP_MIN}개 이상 골라 "분석"을 눌러주세요.</div></div>`;return;}
+  box.innerHTML=`<div class="cmp-ctrlbar">
+    <span class="cmp-lab">조건</span><span id="cmpCondGroup" style="display:flex;gap:9px;align-items:center"></span>
+    <span class="cmp-vdiv"></span>
+    <span class="cmp-lab">기준</span>
+    <div class="cmp-seg"><button class="${CMP_basis==='actual'?'on':''}" onclick="cmpSetBasis('actual')">실측</button><button class="${CMP_basis==='pred'?'on':''}" onclick="cmpSetBasis('pred')">예측</button></div>
+    <div class="cmp-seg"><button class="${CMP_mode==='count'?'on':''}" ${CMP_basis!=='pred'?'disabled':''} onclick="cmpSetMode('count')">장 수</button><button class="${CMP_mode==='time'?'on':''}" ${CMP_basis!=='pred'?'disabled':''} onclick="cmpSetMode('time')">시간</button></div>
+    <input id="cmpTarget" type="text" value="${CMP_basis==='pred'?(CMP_mode==='count'?'10,000':'10'):''}" ${CMP_basis!=='pred'?'disabled':''} oninput="cmpRecalc()" placeholder="${CMP_mode==='count'?'장':'시간'}">
+    <span class="cmp-vdiv"></span>
+    <button class="cmp-mini" onclick="cmpReset()">초기화</button>
+    <span style="flex:1"></span>
+    <div class="cmp-savewrap"><button class="cmp-mini" onclick="cmpToggleSave(event)">결과 저장 ▾</button>
+      <div class="cmp-savemenu" id="cmpSaveMenu"><button onclick="cmpExport('csv')">CSV (.csv)</button><button onclick="cmpExport('json')">JSON (.json)</button></div></div></div>
+  <div class="cmp-cmp" id="cmpCols"></div>
+  <div class="cmp-chart"><h3>원 / 장 — 낮을수록 비용 효율이 높음</h3><div id="cmpBars"></div></div>`;
+  cmpCondGroup();cmpRecalc();
+}
+function cmpRecalc(){
+  const sel=CMP_cache.ids.map(id=>CMP_GPUS.find(g=>g.id===id)).filter(Boolean);const t=cmpGetTarget();
+  const res=sel.map(g=>{const st=cmpEff(g,CMP_condF);return{g,st,...(st?cmpCompute(g,st,CMP_basis,CMP_mode,t):{cpp:null})};});
+  const valid=res.filter(r=>r.st);const cpps=valid.map(r=>r.cpp);const min=cpps.length?Math.min(...cpps):0;
+  const predHead=CMP_basis==='actual'?'실측 누적':'예측';
+  const cols=document.getElementById('cmpCols');cols.style.gridTemplateColumns=`repeat(${sel.length}, minmax(0,1fr))`;
+  cols.innerHTML=res.map(r=>{const s=CMP_SRC[r.g.src];
+    if(!r.st)return `<div class="cmp-col ${s.cls}"><span class="cmp-badge ${s.cls}">${s.label}</span><div class="cmp-ch">${r.g.name}</div><div class="cmp-cs">${r.g.mode} 모드</div><div class="cmp-nodata">선택한 조건의<br>측정 데이터 없음</div></div>`;
+    const best=r.cpp===min&&valid.length>1;
+    const subt=CMP_basis==='actual'?`실제 ${cmpWon(r.total)} · ${r.hours.toFixed(1)}h · ${cmpFnum(r.images)}장`:`총 ${cmpWon(r.total)} · ${r.hours.toFixed(1)}h(과금 ${r.bh.toFixed(1)}h)`;
+    const smallt=CMP_basis==='actual'?'지금까지 측정된 그대로':(CMP_mode==='count'?cmpFnum(t)+'장':cmpFnum(t)+'시간')+' 돌린다고 가정';
+    return `<div class="cmp-col ${s.cls}"><span class="cmp-badge ${s.cls}">${s.label}</span>
+      <div class="cmp-ch">${r.g.name}</div><div class="cmp-cs">${r.g.mode} 모드 · ${r.g.date?r.g.date+' (KST)':'실시간'}</div>
+      <div class="cmp-pred"><div class="cmp-zhead pred"><span class="dot"></span>${predHead}<span class="sm">${smallt}</span></div>
+        <div class="cmp-cpplab">원 / 장</div><div class="cmp-cpp ${best?'g':'n'}">${r.cpp.toFixed(1)}<small>원</small></div>
+        <div class="cmp-psub">${subt}</div></div>
+      <div><div class="cmp-zhead fact"><span class="dot"></span>실측<span class="sm">측정된 속도</span></div>
+        <div class="cmp-r"><span>초/장</span><b>${r.st.spm.toFixed(1)}s</b></div>
+        <div class="cmp-r"><span>장/시간</span><b>${cmpFnum(r.st.iph)}</b></div>
+        <div class="cmp-r"><span>VRAM peak</span><b>${(r.g.vram||0).toFixed(1)} GB</b></div>
+        <div class="cmp-r"><span>표본</span><b>${cmpFnum(r.st.n)}장</b></div></div></div>`;}).join('');
+  const bm=cpps.length?Math.max(...cpps)*1.12:1;
+  document.getElementById('cmpBars').innerHTML=res.map(r=>{if(!r.st)return `<div class="cmp-barrow"><span class="cmp-barlab">${CMP_SRC[r.g.src].label} ${r.g.name}</span><span class="cmp-bartrack"></span><span class="cmp-barval" style="opacity:.5">없음</span></div>`;
+    const best=r.cpp===min&&valid.length>1;const col=best?'var(--green)':'var(--purple)';
+    return `<div class="cmp-barrow"><span class="cmp-barlab">${CMP_SRC[r.g.src].label} ${r.g.name} <span style="opacity:.6">${r.g.mode}</span></span>
+      <span class="cmp-bartrack"><span class="cmp-barfill" data-w="${(r.cpp/bm*100).toFixed(1)}" style="background:${col}"></span></span>
+      <span class="cmp-barval" style="color:${col}">${r.cpp.toFixed(1)}원</span></div>`;}).join('');
+  requestAnimationFrame(()=>document.querySelectorAll('.cmp-barfill').forEach(b=>b.style.width=b.dataset.w+'%'));
+}
+function cmpExport(fmt){const sel=CMP_cache.ids.map(id=>CMP_GPUS.find(g=>g.id===id));const t=cmpGetTarget();
+  const rows=sel.map(g=>{const st=cmpEff(g,CMP_condF);if(!st)return{출처:CMP_SRC[g.src].label,GPU:g.name,모드:g.mode,비고:'선택조건 데이터없음'};const c=cmpCompute(g,st,CMP_basis,CMP_mode,t);
+    return{출처:CMP_SRC[g.src].label,GPU:g.name,모드:g.mode,측정기준일:g.date||'실시간',조건:cmpCondLabel(CMP_condF),기준:CMP_basis==='actual'?'실측':'예측',초당장:st.spm.toFixed(2),장당시간:Math.round(st.iph),과금단위:g.billing==='minute'?'분당':'시간당',시간당단가:g.price,기본금:g.base,스토리지:g.storage,장수:Math.round(c.images),사용시간_h:c.hours.toFixed(2),총비용:Math.round(c.total),원당장:c.cpp.toFixed(1)};});
+  if(fmt==='json')cmpDownload('zimage_compare.json',JSON.stringify(rows,null,2));
+  else{const h=Object.keys(rows[0]);cmpDownload('zimage_compare.csv','\ufeff'+[h.join(','),...rows.map(r=>h.map(k=>r[k]==null?'':r[k]).join(','))].join('\n'));}
+  cmpToast(fmt.toUpperCase()+' 저장 완료.');}
+function cmpDownload(n,c){const b=new Blob([c],{type:'text/plain'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=n;a.click();}
+let CMP_toT;function cmpToast(m){const e=document.getElementById('cmpToast');if(!e)return;e.textContent=m;e.classList.add('show');clearTimeout(CMP_toT);CMP_toT=setTimeout(()=>e.classList.remove('show'),3400);}
+document.addEventListener('click',()=>{const m=document.getElementById('cmpSaveMenu');if(m)m.classList.remove('show');});

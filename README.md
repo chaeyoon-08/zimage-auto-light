@@ -101,3 +101,20 @@ flowchart LR
 | POST | `/api/generate` | 수동 1장 생성 |
 | POST | `/api/job/{start,pause,resume,cancel}` | 자동 생성 잡 제어 |
 | POST | `/api/control` | 대상 레플리카에 제어 명령 전달 |
+## 비교 탭 (GPU 성능·비용 비교)
+
+레플리카가 아니라 **GPU 종류 단위**로 성능·비용(특히 원/장)을 비교하는 탭. 자사(GCUBE) GPU끼리, 그리고 경쟁사 플랫폼(RunPod/Replicate/fal.ai 등)과 비교한다.
+
+- **카탈로그**: GPU 카드 목록(자사/경쟁사). 비교 모드로 2~4개 선택 → 분석. 카드 클릭 시 상세 모달(도넛 비용 분해·조건 선택·실측/예측).
+- **비교 분석**: 고른 GPU를 컬럼으로 비교. 조건(해상도·step·guidance) 종속 드롭다운, 실측/예측 기준, 원/장 막대그래프, 결과 저장(CSV/JSON).
+- **가격·정책은 `gpu_profiles.json`에서** 읽는다. 성능 수치는 통계함에서 측정돼 모델명으로 조인된다(현재 v1: 성능은 placeholder, 통계함 백엔드는 다음 단계).
+
+### gpu_profiles.json
+- 위치: `/workspace/gpu_profiles.json` (RUN_ID·deployment 무관 고정, 공유 마운트).
+- 적용: 파일을 해당 위치에 두거나, 비교 탭 **⬆ 프로파일 불러오기**로 업로드 → **↻ 새로고침**.
+- 백업: **⬇ 내보내기**로 내려받고, 복구 시 다시 넣고 새로고침.
+- 스키마: `gpu_profiles.sample.json` 참고. `gpus[].model`은 측정된 GPU명과 일치해야 성능이 연결됨. 성능 수치는 적지 않는다.
+
+### API
+- `GET /api/gpu_profiles` — 현재 프로파일 반환(없으면 빈 골격).
+- `POST /api/gpu_profiles` — 업로드된 프로파일을 `/workspace/gpu_profiles.json`에 저장(providers 배열 필수).

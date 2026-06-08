@@ -80,6 +80,8 @@ CURRENT_DIR = DEPLOY_DIR / RUN_ID   # UI 렌더링용 (실행 격리 키)
 STATUS_DIR = CURRENT_DIR / "status"
 HISTORY_DIR = CURRENT_DIR / "history"
 CONTROL_DIR = CURRENT_DIR / "control"   # 타겟 제어 명령함: UI가 control/<파드>.json 에 쓰면 해당 레플리카가 읽어 실행
+# 비교 탭: GPU 가격·과금정책 프로파일(가격/정책/정체성만, 성능 수치는 통계함에서). RUN_ID 무관 고정 위치, 공유 마운트 하나로 전체 반영.
+GPU_PROFILES_PATH = WORK_DIR / "gpu_profiles.json"
 STARTED_AT = dt.datetime.now()      # 레플리카 시작 시각 (uptime용)
 
 DEFAULT_WIDTH = int(os.getenv("ZIMG_WIDTH", "1024"))
@@ -622,6 +624,33 @@ def generate(
 @app.get("/api/status")
 def status():
     return job.status()
+
+
+# ───────── 비교 탭: GPU 가격·과금정책 프로파일 ─────────
+# 가격/정책/정체성만 담는다(성능 수치는 통계함에서). 마운트 직접 접근 못 해도 UI 업로드로 설정 가능.
+@app.get("/api/gpu_profiles")
+def get_gpu_profiles():
+    try:
+        if GPU_PROFILES_PATH.exists():
+            return json.loads(GPU_PROFILES_PATH.read_text(encoding="utf-8"))
+    except Exception as e:
+        return JSONResponse(
+            {"error": f"읽기 실패: {e}", "schema_version": 1, "currency": "KRW", "providers": []},
+            status_code=200)
+    return {"schema_version": 1, "currency": "KRW", "providers": []}
+
+
+@app.post("/api/gpu_profiles")
+def save_gpu_profiles(payload: dict = Body(...)):
+    # 업로드된 프로파일을 /workspace/gpu_profiles.json 에 저장 → 공유 마운트라 전체 레플리카에 반영
+    if not isinstance(payload, dict) or not isinstance(payload.get("providers"), list):
+        return JSONResponse({"ok": False, "error": "providers 배열이 필요합니다."}, status_code=400)
+    try:
+        GPU_PROFILES_PATH.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"ok": True, "providers": len(payload["providers"])}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
 @app.post("/api/job/start")

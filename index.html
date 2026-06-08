@@ -54,7 +54,7 @@
   <span class="cube" role="img" aria-label="zimage logo"></span>
   <div class="logo eng"><span class="lt">zimage</span>-auto-light</div>
   <span class="badge" id="modelBadge">uint4</span>
-  <div class="tabs"><button id="tGen" class="on" onclick="show('gen')">생성</button><button id="tDash" onclick="show('dash')">대시보드</button><button id="tImg" onclick="show('img')">이미지</button><button id="tDocs" onclick="show('docs')">사용법</button></div>
+  <div class="tabs"><button id="tGen" class="on" onclick="show('gen')">생성</button><button id="tDash" onclick="show('dash')">대시보드</button><button id="tImg" onclick="show('img')">이미지</button><button id="tCmp" onclick="show('compare')">비교</button><button id="tDocs" onclick="show('docs')">사용법</button></div>
 </header>
 
 <!-- ========== 생성 뷰 ========== -->
@@ -185,6 +185,33 @@
   </div>
 </div>
 
+<!-- ========== 비교 뷰 ========== -->
+<div class="view" id="vCompare" hidden>
+  <div class="cmp-wrap">
+    <div class="cmp-subtabs">
+      <button id="cmpTcat" class="on" onclick="cmpShowSub('cat')">카탈로그</button>
+      <button id="cmpTana" onclick="cmpShowSub('ana')">비교 분석</button>
+    </div>
+    <section id="cmpSubCat">
+      <div class="cmp-catbar">
+        <button id="cmpModeBtn" class="cmp-ghost" onclick="cmpToggleCompare()">비교 모드</button>
+        <span class="cmp-selcount" id="cmpSelCount"></span>
+        <button id="cmpAnaBtn" class="cmp-main" onclick="cmpRunAnalysis()" disabled>분석 →</button>
+        <span class="cmp-prof">
+          <input type="file" id="cmpFile" accept="application/json,.json" style="display:none" onchange="cmpImport(this.files[0])">
+          <button class="cmp-quiet" onclick="document.getElementById('cmpFile').click()" title="gpu_profiles.json 업로드">⬆ 프로파일 불러오기</button>
+          <button class="cmp-quiet" onclick="cmpExportProfiles()" title="현재 프로파일 내려받기(백업)">⬇ 내보내기</button>
+          <button class="cmp-quiet" id="cmpRefreshBtn" onclick="cmpRefresh()" title="gpu_profiles.json·통계 다시 읽기">↻ 새로고침</button>
+        </span>
+      </div>
+      <div id="cmpCatalog"></div>
+    </section>
+    <section id="cmpSubAna" hidden><div id="cmpAna"></div></section>
+  </div>
+</div>
+<div class="cmp-overlay" id="cmpOverlay" onclick="if(event.target===this)cmpCloseModal()"><div class="cmp-modal" id="cmpModal"></div></div>
+<div class="cmp-toast" id="cmpToast"></div>
+
 <!-- ========== 사용법 뷰 ========== -->
 <div class="view" id="vDocs" hidden>
   <div class="docs-body" id="docsBody">
@@ -196,6 +223,7 @@
         <button data-t="gen" onclick="showDoc('gen',this)">생성 탭</button>
         <button data-t="dash" onclick="showDoc('dash',this)">대시보드 탭</button>
         <button data-t="img" onclick="showDoc('img',this)">이미지 탭</button>
+        <button data-t="compare" onclick="showDoc('compare',this)">비교 탭</button>
         <button data-t="metrics" onclick="showDoc('metrics',this)">지표 읽는 법</button>
         <button data-t="faq" onclick="showDoc('faq',this)">자주 묻는 것</button>
       </aside>
@@ -586,6 +614,23 @@
               </ul>
             </div>
           </div>
+        </section>
+
+        <section class="d-sec" id="docsec-compare">
+        <div class="d-tag">Compare</div><h1 class="d-h1">비교 탭 · GPU 가격·성능 비교</h1>
+        <p class="d-lead">레플리카가 아니라 <b>GPU 종류 단위</b>로 성능과 비용(특히 <b>원/장</b>)을 비교합니다. 자사(GCUBE) GPU끼리, 그리고 경쟁사 플랫폼과 비교할 수 있습니다.</p>
+        <div class="d-note">
+          <div class="d-n"><div class="t"><span class="d-dot" style="background:#B47AFF"></span>카탈로그 → 비교 분석</div><div class="x">카탈로그에서 <b>비교 모드</b>를 켜고 GPU를 2~4개 고른 뒤 <b>분석</b>을 누르면 비교 분석 화면으로 넘어갑니다. 카드를 누르면(체크박스 외 영역) 상세 모달이 열립니다.</div></div>
+          <div class="d-n"><div class="t"><span class="d-dot" style="background:#8cffb0"></span>실측 / 예측</div><div class="x"><b>실측</b>은 지금까지 측정된 그대로, <b>예측</b>은 "N장/N시간 돌린다고 가정하면" 비용을 계산합니다. 조건(해상도·step·guidance)을 골라 같은 조건끼리 비교할 수 있습니다.</div></div>
+          <div class="d-n"><div class="t"><span class="d-dot" style="background:#9fb4ff"></span>비용은 대여 시간 기준</div><div class="x">플랫폼은 사용 시간(시간당/분당, 올림)으로 과금합니다. 총비용 = 시간당단가 × 과금시간 + 기본금 + 스토리지. 통화는 원화로 표시합니다.</div></div>
+        </div>
+        <h2 class="d-h2">GPU 가격·과금 정책 설정 (gpu_profiles.json)</h2>
+        <p class="d-lead">카드에 뜨는 가격·정책은 <b>gpu_profiles.json</b> 파일에서 읽습니다. 성능 수치는 적지 않습니다(자동 측정). 회사·GPU를 추가하거나 단가를 바꾸려면 이 파일을 수정합니다.</p>
+        <div class="d-note">
+          <div class="d-n"><div class="t">① 파일 준비</div><div class="x"><code>gpu_profiles.json</code>을 편집기로 열어 <code>providers</code> 배열에 회사·과금정책·GPU 단가를 적습니다. <code>kind</code>는 <code>self</code>(자사) 또는 <code>competitor</code>(경쟁사), <code>billing.unit</code>은 <code>minute</code>/<code>hour</code>. <code>gpus[].model</code>은 측정된 GPU명과 똑같이 적어야 성능이 연결됩니다.</div></div>
+          <div class="d-n"><div class="t">② 적용 (둘 중 하나)</div><div class="x">· 파일을 마운트 저장소 <code>/workspace/gpu_profiles.json</code> 에 넣습니다.<br>· 또는 비교 탭의 <b>⬆ 프로파일 불러오기</b>로 업로드합니다(마운트 직접 접근이 어려울 때).</div></div>
+          <div class="d-n"><div class="t">③ 새로고침</div><div class="x">비교 탭의 <b>↻ 새로고침</b>을 누르면 즉시 반영됩니다. <b>⬇ 내보내기</b>로 현재 프로파일을 내려받아 백업하고, 복구 시 다시 넣고 새로고침하면 됩니다.</div></div>
+        </div>
         </section>
 
         <section class="d-sec" id="docsec-metrics">
